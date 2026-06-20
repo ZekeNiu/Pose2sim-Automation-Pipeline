@@ -1,0 +1,54 @@
+# User data and generated outputs
+/projects/**
+!/projects/.gitkeep
+/outputs/**
+!/outputs/.gitkeep
+/assets/checkerboards/generated/**
+!/assets/checkerboards/generated/.gitkeep
+
+# Runtime caches and logs
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+logs.txt
+opensim.log
+
+# Large media and generated biomechanics files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.wmv
+*.m4v
+*.webm
+*.json
+*.trc
+*.c3d
+*.mot
+*.sto
+*.osim
+*.xlsx
+*.html
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.pickle
+*.toml
+*.qca.txt
+*.xcp
+*.yml
+
+# Keep source-controlled templates/config examples if added later
+!pyproject.toml
+!pose2sim_pipeline_gui/**/*.py
+!tests/**/*.py
+!README.md
+!task_plan.md
+!findings.md
+!progress.md
+!assets/checkerboards/generated/.gitkeep
