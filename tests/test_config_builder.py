@@ -19,12 +19,40 @@ def test_build_config_defaults_for_single_person_phone_workflow() -> None:
     assert config["pose"]["parallel_workers_pose"] == "auto"
     assert config["pose"]["save_video"] == "to_video"
     assert config["synchronization"]["approx_time_maxspeed"] == [1.0, 1.2]
+    assert config["synchronization"]["time_range_around_maxspeed"] == 2.0
     assert config["calibration"]["calculate"]["extrinsics"]["extrinsics_method"] == "scene"
+    assert config["markerAugmentation"]["feet_on_floor"] is False
     assert config["kinematics"]["use_augmentation"] is True
+    assert config["kinematics"]["right_left_symmetry"] is True
+
+
+def test_build_config_writes_exposed_gui_parameters() -> None:
+    settings = PipelineSettings(
+        project_name="demo",
+        pose_model="Whole_body_wrist",
+        speed_preset="accurate",
+        save_overlay_video=False,
+        feet_on_floor=True,
+        right_left_symmetry=False,
+        extrinsics_board_position="vertical",
+        sync_search_range_seconds=3.5,
+        filter_cutoff_hz=8.0,
+    )
+    config = build_config_dict(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), settings)
+
+    assert config["pose"]["pose_model"] == "Whole_body_wrist"
+    assert config["pose"]["mode"] == "performance"
+    assert config["pose"]["det_frequency"] == 2
+    assert config["pose"]["save_video"] == "none"
+    assert config["calibration"]["calculate"]["extrinsics"]["board"]["board_position"] == "vertical"
+    assert config["synchronization"]["time_range_around_maxspeed"] == 3.5
+    assert config["markerAugmentation"]["feet_on_floor"] is True
+    assert config["kinematics"]["right_left_symmetry"] is False
+    assert config["filtering"]["butterworth"]["cut_off_frequency"] == 8.0
 
 
 def test_board_calibration_switches_extrinsics_method() -> None:
-    settings = PipelineSettings(project_name="demo", calibration_mode="board")
+    settings = PipelineSettings(project_name="demo", calibration_mode="board", scene_points_text="not a scene point list")
     config = build_config_dict(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), settings)
     assert config["calibration"]["calculate"]["extrinsics"]["extrinsics_method"] == "board"
 
@@ -35,3 +63,13 @@ def test_parse_scene_points_rejects_short_or_bad_values() -> None:
     with pytest.raises(ValueError):
         parse_scene_points("[[0, 0]]")
 
+
+def test_gui_labels_map_to_pose2sim_internal_values() -> None:
+    from pose2sim_pipeline_gui.app import BOARD_POSITION_OPTIONS, CALIBRATION_MODE_OPTIONS, SPEED_PRESET_OPTIONS, STEP_TABS
+
+    assert STEP_TABS == ["环境", "项目", "校准", "视频", "参数", "运行"]
+    assert CALIBRATION_MODE_OPTIONS["外参：场景点（推荐，精度更稳）"] == "scene"
+    assert CALIBRATION_MODE_OPTIONS["外参：棋盘格（更简单，要求所有相机清楚看到大棋盘格）"] == "board"
+    assert BOARD_POSITION_OPTIONS["水平放置（地面/地垫）"] == "horizontal"
+    assert BOARD_POSITION_OPTIONS["垂直放置（墙面/支架）"] == "vertical"
+    assert SPEED_PRESET_OPTIONS["更准（performance，较慢）"] == "accurate"

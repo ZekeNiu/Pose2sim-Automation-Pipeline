@@ -55,6 +55,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
         sync_value = [float(v) for v in settings.sync_times_seconds]
 
     extrinsics_method = "scene" if settings.calibration_mode == "scene" else "board"
+    scene_points = parse_scene_points(settings.scene_points_text) if extrinsics_method == "scene" else DEFAULT_SCENE_POINTS
     config: dict[str, Any] = {
         "project": {
             "project_dir": str(project_dir.resolve()),
@@ -74,7 +75,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
             "parallel_workers_pose": "auto",
             "display_detection": False,
             "overwrite_pose": False,
-            "save_video": "to_video",
+            "save_video": "to_video" if settings.save_overlay_video else "none",
             "output_format": "openpose",
             "average_likelihood_threshold_pose": 0.5,
             "tracking_mode": "sports2d",
@@ -88,7 +89,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
             "save_sync_plots": True,
             "keypoints_to_consider": "all",
             "approx_time_maxspeed": sync_value,
-            "time_range_around_maxspeed": 2.0,
+            "time_range_around_maxspeed": float(settings.sync_search_range_seconds),
             "likelihood_threshold_synchronization": 0.4,
             "filter_cutoff": 6,
             "filter_order": 4,
@@ -117,7 +118,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
                         "extrinsics_square_size": float(settings.extrinsics_square_size_mm),
                     },
                     "scene": {
-                        "object_coords_3d": parse_scene_points(settings.scene_points_text),
+                        "object_coords_3d": scene_points,
                     },
                 },
             },
@@ -167,14 +168,14 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
             },
         },
         "markerAugmentation": {
-            "feet_on_floor": False,
+            "feet_on_floor": bool(settings.feet_on_floor),
             "make_c3d": True,
         },
         "kinematics": {
             "use_augmentation": bool(settings.marker_augmentation),
             "use_simple_model": bool(settings.use_simple_model),
             "parallel_workers_kinematics": "auto",
-            "right_left_symmetry": True,
+            "right_left_symmetry": bool(settings.right_left_symmetry),
             "default_height": float(settings.default_height_m),
             "remove_individual_scaling_setup": True,
             "remove_individual_ik_setup": True,
@@ -194,4 +195,3 @@ def write_config(project_dir: Path, settings: PipelineSettings) -> Path:
     with config_path.open("w", encoding="utf-8") as handle:
         toml.dump(config, handle)
     return config_path
-

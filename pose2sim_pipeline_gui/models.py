@@ -24,8 +24,12 @@ class PipelineSettings:
     scene_points_text: str = ""
     skip_synchronization: bool = False
     sync_times_seconds: list[float] = field(default_factory=list)
+    sync_search_range_seconds: float = 2.0
     marker_augmentation: bool = True
     use_simple_model: bool = False
+    save_overlay_video: bool = True
+    feet_on_floor: bool = False
+    right_left_symmetry: bool = True
     filter_cutoff_hz: float = 6.0
     large_hip_knee_angles: float = 135.0
     trimmed_extrema_percent: float = 0.5
@@ -74,4 +78,3 @@ class EnvironmentStatus:
         else:
             lines.append("环境检查通过。")
         return lines
-
