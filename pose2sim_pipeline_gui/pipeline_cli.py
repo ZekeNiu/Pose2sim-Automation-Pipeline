@@ -6,10 +6,8 @@ import sys
 import traceback
 from pathlib import Path
 
-import toml
-
 from .paths import WORKSPACE_ROOT, output_dir
-from .report import generate_reports
+from .report import generate_reports_for_project
 
 
 STEP_LABELS = {
@@ -38,23 +36,24 @@ DEFAULT_STEPS = [
 ]
 
 
-def _load_config(project_dir: Path) -> dict:
-    config_path = project_dir / "Config.toml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"未找到配置文件: {config_path}")
-    config = toml.load(config_path)
-    config.setdefault("project", {})
-    config["project"]["project_dir"] = str(project_dir.resolve())
-    return config
-
-
 def run_steps(project_dir: Path, steps: list[str], skip_synchronization: bool = False) -> None:
-    from Pose2Sim import Pose2Sim
+    from Pose2Sim.Pose2Sim import Pose2SimPipeline
 
     project_dir = project_dir.resolve()
     os.chdir(project_dir)
-    config = _load_config(project_dir)
+    if not (project_dir / "Config.toml").exists():
+        raise FileNotFoundError(f"未找到配置文件: {project_dir / 'Config.toml'}")
+    pipeline = Pose2SimPipeline(str(project_dir))
     marker_aug_failed = False
+    stage_methods = {
+        "calibration": pipeline.calibration,
+        "poseEstimation": pipeline.poseEstimation,
+        "synchronization": pipeline.synchronization,
+        "personAssociation": pipeline.personAssociation,
+        "triangulation": pipeline.triangulation,
+        "filtering": pipeline.filtering,
+        "kinematics": pipeline.kinematics,
+    }
 
     for step in steps:
         if step == "synchronization" and skip_synchronization:
@@ -62,20 +61,24 @@ def run_steps(project_dir: Path, steps: list[str], skip_synchronization: bool = 
             continue
         print(f"\n==== 开始：{STEP_LABELS.get(step, step)} ====", flush=True)
         if step == "reports":
-            generate_reports(project_dir, output_dir(project_dir.name))
+            generate_reports_for_project(project_dir, output_dir(project_dir.name))
         elif step == "markerAugmentation":
             try:
-                Pose2Sim.markerAugmentation(config)
+                pipeline.markerAugmentation()
             except Exception as exc:
                 marker_aug_failed = True
-                config.setdefault("kinematics", {})["use_augmentation"] = False
+                for config in pipeline.config_dicts:
+                    config.setdefault("kinematics", {})["use_augmentation"] = False
                 print(f"标记点增强失败，已切换为不使用增强继续运行: {exc}", flush=True)
         elif step == "kinematics":
             if marker_aug_failed:
-                config.setdefault("kinematics", {})["use_augmentation"] = False
-            Pose2Sim.kinematics(config)
+                for config in pipeline.config_dicts:
+                    config.setdefault("kinematics", {})["use_augmentation"] = False
+            stage_methods["kinematics"]()
         else:
-            getattr(Pose2Sim, step)(config)
+            if step not in stage_methods:
+                raise ValueError(f"未知运行阶段: {step}")
+            stage_methods[step]()
         print(f"==== 完成：{STEP_LABELS.get(step, step)} ====", flush=True)
 
 
@@ -98,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             run_steps(project_dir, args.steps, skip_synchronization=args.skip_synchronization)
         elif args.command == "reports":
-            generate_reports(project_dir, output_dir(project_dir.name))
+            generate_reports_for_project(project_dir, output_dir(project_dir.name))
         return 0
     except Exception:
         traceback.print_exc()
@@ -107,4 +110,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

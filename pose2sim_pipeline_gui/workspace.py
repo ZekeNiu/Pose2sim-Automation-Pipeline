@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from .config_builder import write_config
 from .models import PipelineSettings
 from .paths import PROJECTS_DIR, assert_under_workspace, ensure_workspace, output_dir, project_dir, sanitize_project_name
+from .project_state import ProjectStatus, inspect_project
 from .video import VideoInfo, inspect_video, normalize_video
 
 
@@ -33,9 +35,41 @@ class ProjectWorkspace:
         ]:
             assert_under_workspace(directory).mkdir(parents=True, exist_ok=True)
 
-    def write_config(self, settings: PipelineSettings) -> Path:
+    def status(self) -> ProjectStatus:
+        return inspect_project(self.project_dir)
+
+    def backup_config(self) -> Path | None:
+        config_path = self.project_dir / "Config.toml"
+        if not config_path.exists():
+            return None
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = self.project_dir / f"Config.backup_{stamp}.toml"
+        shutil.copy2(config_path, backup_path)
+        return backup_path
+
+    def write_config(self, settings: PipelineSettings, overwrite: bool = False, backup: bool = True) -> Path:
         self.create()
+        config_path = self.project_dir / "Config.toml"
+        if config_path.exists() and not overwrite:
+            raise FileExistsError(
+                f"{config_path} 已存在。为保护已有项目，GUI 不会自动覆盖。请选择备份并覆盖，或直接按现有 Config 运行。"
+            )
+        if config_path.exists() and backup:
+            self.backup_config()
         return write_config(self.project_dir, settings)
+
+    def calibration_extension(self, kind: str) -> str:
+        if kind not in {"intrinsics", "extrinsics"}:
+            raise ValueError("kind 必须是 intrinsics 或 extrinsics")
+        folder = self.project_dir / "calibration" / kind
+        if not folder.exists():
+            return "mp4"
+        files = sorted(path for path in folder.rglob("*") if path.is_file())
+        for path in files:
+            suffix = path.suffix.lower().lstrip(".")
+            if suffix:
+                return suffix
+        return "mp4"
 
     def import_trial_videos(self, files: list[Path]) -> list[VideoInfo]:
         self.create()
@@ -60,8 +94,13 @@ class ProjectWorkspace:
             shutil.copy2(file_path, source)
             cam_dir = self.project_dir / "calibration" / "intrinsics" / cam
             cam_dir.mkdir(parents=True, exist_ok=True)
-            output = cam_dir / f"{cam}_intrinsics.mp4"
-            normalize_video(source, output)
+            suffix = file_path.suffix.lower()
+            if suffix in IMAGE_EXTENSIONS:
+                output = cam_dir / f"{cam}_intrinsics{suffix}"
+                shutil.copy2(source, output)
+            else:
+                output = cam_dir / f"{cam}_intrinsics.mp4"
+                normalize_video(source, output)
             outputs.append(output)
         return outputs
 
@@ -72,8 +111,13 @@ class ProjectWorkspace:
             cam = f"cam{index:02d}"
             source = self.project_dir / "source" / "calibration_extrinsics" / f"{cam}{file_path.suffix.lower()}"
             shutil.copy2(file_path, source)
-            output = self.project_dir / "calibration" / "extrinsics" / f"{cam}.mp4"
-            normalize_video(source, output)
+            suffix = file_path.suffix.lower()
+            if suffix in IMAGE_EXTENSIONS:
+                output = self.project_dir / "calibration" / "extrinsics" / f"{cam}{suffix}"
+                shutil.copy2(source, output)
+            else:
+                output = self.project_dir / "calibration" / "extrinsics" / f"{cam}.mp4"
+                normalize_video(source, output)
             outputs.append(output)
         return outputs
 

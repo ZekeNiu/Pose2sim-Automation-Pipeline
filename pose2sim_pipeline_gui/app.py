@@ -13,6 +13,7 @@ from .config_builder import DEFAULT_SCENE_POINTS
 from .environment import check_environment, update_pose2sim
 from .models import PipelineSettings
 from .paths import OUTPUTS_DIR, SPORTS3D_PYTHON, ensure_workspace
+from .project_state import ProjectStatus
 from .runner import PipelineRunner
 from .workspace import ProjectWorkspace, list_projects
 
@@ -56,6 +57,7 @@ class Pose2SimChineseApp(ctk.CTk):
         self.minsize(1100, 720)
         self.log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self.workspace: ProjectWorkspace | None = None
+        self.project_status_info: ProjectStatus | None = None
         self.runner = PipelineRunner(SPORTS3D_PYTHON)
         self.update_button: ctk.CTkButton | None = None
         self._build_ui()
@@ -204,12 +206,30 @@ class Pose2SimChineseApp(ctk.CTk):
         self.project_name_entry.pack(side="left", padx=(0, 8))
         ctk.CTkButton(row, text="创建/打开", command=self.create_or_open_project).pack(side="left", padx=(0, 8))
         ctk.CTkButton(row, text="刷新项目列表", command=self.refresh_projects).pack(side="left")
+        object_row = ctk.CTkFrame(tab, fg_color="transparent")
+        object_row.grid(row=3, column=0, sticky="ew", padx=18, pady=8)
+        ctk.CTkLabel(object_row, text="分析对象").pack(side="left", padx=(0, 8))
+        self.analysis_object_var = ctk.StringVar(value="单人")
+        ctk.CTkSegmentedButton(
+            object_row,
+            values=["单人", "多人"],
+            variable=self.analysis_object_var,
+            command=self._on_analysis_object_change,
+        ).pack(side="left", padx=(0, 10))
+        self.multi_person_hint = ctk.CTkLabel(
+            object_row,
+            text="默认单人、单次动作、多机位。多人属于高级用法，对遮挡、同步和人员匹配要求更高。",
+            anchor="w",
+            justify="left",
+            wraplength=760,
+        )
+        self.multi_person_hint.pack(side="left", fill="x", expand=True)
         self.project_list = ctk.CTkComboBox(tab, values=list_projects(), command=self.select_project)
-        self.project_list.grid(row=3, column=0, sticky="ew", padx=18, pady=8)
+        self.project_list.grid(row=4, column=0, sticky="ew", padx=18, pady=8)
         self.project_status = ctk.CTkTextbox(tab, height=380)
-        self.project_status.grid(row=4, column=0, sticky="nsew", padx=18, pady=12)
-        self._step_nav(tab, "项目", 5)
-        tab.grid_rowconfigure(4, weight=1)
+        self.project_status.grid(row=5, column=0, sticky="nsew", padx=18, pady=12)
+        self._step_nav(tab, "项目", 6)
+        tab.grid_rowconfigure(5, weight=1)
 
     def _build_calibration_tab(self) -> None:
         tab = self.tabs.tab("校准")
@@ -247,18 +267,28 @@ class Pose2SimChineseApp(ctk.CTk):
         board_grid.grid(row=3, column=0, sticky="ew", padx=18, pady=8)
         for i in range(4):
             board_grid.grid_columnconfigure(i, weight=1)
-        self.square_entry = self._entry(
+        self.intrinsics_square_entry = self._entry(
             board_grid,
-            "棋盘格方格边长(mm)",
+            "内参棋盘格方格边长(mm)",
             "35",
             0,
             0,
-            info_title="棋盘格尺寸",
-            info_body="使用本软件生成的棋盘格时，内角点数量固定为 4 x 7，默认方格边长 35 mm。\n\n"
-            "打印时选择“实际大小/100%”，不要选择“适应页面”。打印后用尺子量一个方格；如果不是 35 mm，请把实测边长填在这里。",
+            info_title="内参棋盘格尺寸",
+            info_body="内参用于描述每台相机镜头畸变。默认生成 A4、4 x 7 内角点、35 mm 方格。\n\n"
+            "打印时选择“实际大小/100%”，不要选择“适应页面”。打印后量一个方格；如果不是 35 mm，请把实测边长填在这里。",
+        )
+        self.extrinsics_square_entry = self._entry(
+            board_grid,
+            "外参棋盘格方格边长(mm)",
+            "45",
+            0,
+            1,
+            info_title="外参棋盘格尺寸",
+            info_body="只有选择“棋盘格外参”时需要。默认建议 A3、4 x 7 内角点、45 mm 方格，是打印便利和全身外参稳定性的折中。\n\n"
+            "如果只能用 A4，也可以尝试，但全身动作优先推荐“场景点外参”。",
         )
         self.board_position_frame = ctk.CTkFrame(board_grid, fg_color="transparent")
-        self.board_position_frame.grid(row=0, column=1, rowspan=2, sticky="ew", padx=(0, 10))
+        self.board_position_frame.grid(row=0, column=2, rowspan=2, sticky="ew", padx=(0, 10))
         self.board_position_frame.grid_columnconfigure(0, weight=1)
         self._label_with_info(
             self.board_position_frame,
@@ -274,15 +304,16 @@ class Pose2SimChineseApp(ctk.CTk):
         self.board_position_box.set("水平放置（地面/地垫）")
         ctk.CTkLabel(
             board_grid,
-            text="生成的 PDF/PNG 适合 A4 实际大小打印；外参如果用棋盘格，全身动作建议使用更大的板。",
+            text="内参通常 A4 就够；棋盘格外参建议 A3 或更大。两种棋盘格可以规格不同，GUI 会分别写入 Config。",
             anchor="w",
             justify="left",
-            wraplength=760,
-        ).grid(row=1, column=2, columnspan=2, sticky="w", pady=(0, 10))
+            wraplength=360,
+        ).grid(row=1, column=3, sticky="w", pady=(0, 10))
 
         buttons = ctk.CTkFrame(content, fg_color="transparent")
         buttons.grid(row=4, column=0, sticky="ew", padx=18, pady=8)
-        ctk.CTkButton(buttons, text="生成棋盘格 PDF/PNG", command=self.make_checkerboard).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="生成内参棋盘格 A4", command=self.make_intrinsics_checkerboard).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="生成外参棋盘格 A3", command=self.make_extrinsics_checkerboard).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="导入内参棋盘格视频", command=self.import_intrinsics).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="导入外参视频/图片", command=self.import_extrinsics).pack(side="left")
 
@@ -295,30 +326,66 @@ class Pose2SimChineseApp(ctk.CTk):
             "2. 每段约 20-40 秒。拿着棋盘格缓慢移动，让棋盘格出现在画面中央、四角、近处、远处，并有轻微倾斜和旋转。\n"
             "3. 多数画面里棋盘格要完整可见，避免反光、运动模糊、遮挡和严重过曝。\n\n"
             "场景点外参怎么做：\n"
-            "1. 正式摆好所有相机后，不要再移动相机。录制或截取每个机位都能看到的静态场景。\n"
-            "2. 选择地面标记、墙角、箱体角点、跑台边缘等可测量点；建议至少 10 个点，尽量覆盖运动区域和不同高度。\n"
-            "3. 在下方填写这些点的真实 3D 坐标，单位是米。\n\n"
+            "1. 先定义坐标系，例如运动区域地面中心为 P1=[0,0,0]，前方是 X 正方向，左方是 Y 正方向，上方是 Z 正方向，单位是米。\n"
+            "2. 3D 坐标来自现场测量：卷尺、激光测距仪、地砖尺寸、场地标线或已知物体尺寸都可以。它不是视频里的像素坐标。\n"
+            "3. 点上建议放彩色胶带十字、编号贴纸、小锥桶、反光点；如果墙角、箱体角点、跑台边缘足够清楚，也可以不额外放东西。\n"
+            "4. 正式摆好所有相机后，不要再移动相机。拍每个机位都能看到这些点的外参资料：清晰图片即可，录 3-5 秒静态视频也可以。\n"
+            "5. 外参资料拍完后，只要相机不动，点位标记可以移走，再录正式动作视频。后续在 GUI/校准工具里点选时，点击顺序必须和表格 P1、P2、P3 一致。\n\n"
             "棋盘格外参怎么做：\n"
-            "1. 相机固定后，把棋盘格放在所有相机都能清楚看到的位置，可水平放在地面，也可垂直固定。\n"
-            "2. 录制 3-5 秒清晰视频或导入清晰图片。A4 板适合内参；全身动作外参建议用更大的板，否则空间尺度容易不稳。\n",
+            "1. 相机固定后，把较大的外参棋盘格放在所有相机都能清楚看到的位置，可水平放在地面，也可垂直固定。\n"
+            "2. 建议使用 GUI 生成的 A3/45 mm 外参棋盘格；A4 可用但不推荐全身动作。录制 3-5 秒清晰视频或导入清晰图片。\n"
+            "3. 内参棋盘格和外参棋盘格参数是独立的；如果实际打印尺寸不同，请分别修改上方两个方格边长。\n",
         )
         guide_text.configure(state="disabled")
 
         self.scene_points_frame = ctk.CTkFrame(content, fg_color="transparent")
         self.scene_points_frame.grid(row=6, column=0, sticky="ew", padx=18, pady=(2, 8))
-        self.scene_points_frame.grid_columnconfigure(0, weight=1)
+        for col in range(5):
+            self.scene_points_frame.grid_columnconfigure(col, weight=1 if col else 0)
         self._label_with_info(
             self.scene_points_frame,
-            "外参场景点 [[X,Y,Z], ...]，单位：米",
+            "外参场景点表格（单位：米）",
             0,
             0,
             "场景点怎么填写",
             "这里填写真实世界中的 3D 坐标，不是视频里的像素坐标。\n\n"
-            "示例：地面中心可以设为 [0, 0, 0]，向前 1 米是 [1, 0, 0]，向左 0.3 米是 [0, 0.3, 0]。点越分散、越容易在各机位中准确点击，外参越可靠。",
+            "示例：地面中心可以设为 P1=[0,0,0]，向前 1 米是 [1,0,0]，向左 0.3 米是 [0,0.3,0]。点越分散、越容易在各机位中准确点击，外参越可靠。",
+            columnspan=5,
         )
-        self.scene_points_text = ctk.CTkTextbox(self.scene_points_frame, height=150)
-        self.scene_points_text.grid(row=1, column=0, sticky="ew", pady=(0, 4))
-        self.scene_points_text.insert("end", str(DEFAULT_SCENE_POINTS))
+        headers = ["点编号", "X", "Y", "Z", "现场说明"]
+        for col, header in enumerate(headers):
+            ctk.CTkLabel(self.scene_points_frame, text=header).grid(row=1, column=col, sticky="w", pady=(4, 2))
+        self.scene_point_entries: list[tuple[ctk.CTkEntry, ctk.CTkEntry, ctk.CTkEntry, ctk.CTkEntry, ctk.CTkEntry]] = []
+        default_notes = [
+            "地面左前角/胶带十字",
+            "地面前中点/胶带十字",
+            "前方低高度点",
+            "地面右前角/胶带十字",
+            "地面左中点/胶带十字",
+            "原点/地面中心",
+            "中心低高度点",
+            "地面右中点/胶带十字",
+            "地面左后角/胶带十字",
+            "地面右后角/胶带十字",
+        ]
+        for row_index, coords in enumerate(DEFAULT_SCENE_POINTS[:10], start=2):
+            point_entry = ctk.CTkEntry(self.scene_points_frame, width=70)
+            point_entry.insert(0, f"P{row_index - 1}")
+            x_entry = ctk.CTkEntry(self.scene_points_frame)
+            y_entry = ctk.CTkEntry(self.scene_points_frame)
+            z_entry = ctk.CTkEntry(self.scene_points_frame)
+            note_entry = ctk.CTkEntry(self.scene_points_frame)
+            for entry, value, col in [
+                (point_entry, f"P{row_index - 1}", 0),
+                (x_entry, str(coords[0]), 1),
+                (y_entry, str(coords[1]), 2),
+                (z_entry, str(coords[2]), 3),
+                (note_entry, default_notes[row_index - 2], 4),
+            ]:
+                if entry is not point_entry:
+                    entry.insert(0, value)
+                entry.grid(row=row_index, column=col, sticky="ew", padx=(0, 8), pady=2)
+            self.scene_point_entries.append((point_entry, x_entry, y_entry, z_entry, note_entry))
 
         self.calibration_text = ctk.CTkTextbox(content, height=100)
         self.calibration_text.grid(row=7, column=0, sticky="ew", padx=18, pady=(6, 12))
@@ -362,21 +429,22 @@ class Pose2SimChineseApp(ctk.CTk):
 
         self.height_entry = self._entry(
             grid,
-            "身高(m，可空)",
+            "身高(m；多人可逗号分隔)",
             "1.75",
             0,
             0,
             info_title="身高",
-            info_body="身高用于 OpenSim 缩放和标记点增强。尽量填写真实身高；留空时 Pose2Sim 会尝试自动估计，但标记点增强和尺度可能更不稳定。",
+            info_body="身高用于 OpenSim 缩放和标记点增强。单人填写一个值；多人可按人员顺序填写多个值，例如 1.75,1.68。\n\n"
+            "留空时 Pose2Sim 会尝试自动估计，但标记点增强和尺度可能更不稳定。",
         )
         self.mass_entry = self._entry(
             grid,
-            "体重(kg)",
+            "体重(kg；多人可逗号分隔)",
             "70",
             0,
             1,
             info_title="体重",
-            info_body="体重主要影响后续动力学分析，对本工具输出的关节角度影响很小。未知时可以保留 70 kg。",
+            info_body="体重主要影响后续动力学分析，对本工具输出的关节角度影响很小。单人填写一个值；多人可按人员顺序填写多个值。未知时可以保留 70 kg。",
         )
         self.frame_start_entry = self._entry(
             grid,
@@ -554,7 +622,9 @@ class Pose2SimChineseApp(ctk.CTk):
         buttons = ctk.CTkFrame(tab, fg_color="transparent")
         buttons.grid(row=1, column=0, sticky="ew", padx=18, pady=8)
         ctk.CTkButton(buttons, text="保存 Config.toml", command=self.save_config).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(buttons, text="运行完整流程", command=self.run_pipeline).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="保存配置并运行完整流程", command=self.run_pipeline).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="按现有 Config 运行", command=self.run_existing_config).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="从缺失阶段继续", command=self.run_missing_steps).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="仅生成报告", command=self.generate_reports).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="打开输出目录", command=self.open_output_dir).pack(side="left")
         self.run_text = ctk.CTkTextbox(tab)
@@ -573,25 +643,34 @@ class Pose2SimChineseApp(ctk.CTk):
 
     def _settings(self) -> PipelineSettings:
         workspace = self._current_workspace()
-        height = self._optional_float(self.height_entry.get())
-        mass = self._optional_float(self.mass_entry.get()) or 70.0
+        multi_person = self.analysis_object_var.get() == "多人"
+        heights = self._float_list(self.height_entry.get())
+        masses = self._float_list(self.mass_entry.get())
+        height = heights[0] if heights else None
+        mass = masses[0] if masses else 70.0
         frame_start = self._optional_int(self.frame_start_entry.get())
         frame_end = self._optional_int(self.frame_end_entry.get())
-        square = self._optional_float(self.square_entry.get()) or 35.0
+        intrinsics_square = self._optional_float(self.intrinsics_square_entry.get()) or 35.0
+        extrinsics_square = self._optional_float(self.extrinsics_square_entry.get()) or 45.0
         sync_times = [float(v.strip()) for v in self.sync_times_entry.get().split(",") if v.strip()]
         calibration_mode = self._calibration_mode_value()
-        scene_points = self.scene_points_text.get("1.0", "end") if calibration_mode == "scene" else ""
+        scene_points = self._scene_points_table_text() if calibration_mode == "scene" else ""
         return PipelineSettings(
             project_name=workspace.name,
+            multi_person=multi_person,
             participant_height_m=height,
+            participant_heights_m=heights if multi_person else [],
             participant_mass_kg=mass,
+            participant_masses_kg=masses if multi_person else [],
             frame_start=frame_start,
             frame_end=frame_end,
             pose_model=self._pose_model_value(),
             speed_preset=self._speed_preset_value(),
             calibration_mode=calibration_mode,
-            intrinsics_square_size_mm=square,
-            extrinsics_square_size_mm=square,
+            intrinsics_square_size_mm=intrinsics_square,
+            intrinsics_extension=workspace.calibration_extension("intrinsics"),
+            extrinsics_square_size_mm=extrinsics_square,
+            extrinsics_extension=workspace.calibration_extension("extrinsics"),
             extrinsics_board_position=self._board_position_value(),
             scene_points_text=scene_points,
             skip_synchronization=self.skip_sync_var.get(),
@@ -630,6 +709,26 @@ class Pose2SimChineseApp(ctk.CTk):
         if not value:
             return None
         return int(value)
+
+    @staticmethod
+    def _float_list(value: str) -> list[float]:
+        parts = [part.strip() for part in value.replace("，", ",").split(",") if part.strip()]
+        return [float(part) for part in parts]
+
+    def _scene_points_table_text(self) -> str:
+        lines = ["点编号,X,Y,Z,现场说明"]
+        for point_entry, x_entry, y_entry, z_entry, note_entry in self.scene_point_entries:
+            point = point_entry.get().strip()
+            x = x_entry.get().strip()
+            y = y_entry.get().strip()
+            z = z_entry.get().strip()
+            note = note_entry.get().strip()
+            if not point and not x and not y and not z:
+                continue
+            if not point or not x or not y or not z:
+                raise ValueError("场景点表格中每一行都需要点编号、X、Y、Z；不用的行请全部留空。")
+            lines.append(f"{point},{x},{y},{z},{note}")
+        return "\n".join(lines)
 
     def _append(self, widget: ctk.CTkTextbox, text: str) -> None:
         widget.insert("end", text + "\n")
@@ -738,6 +837,36 @@ class Pose2SimChineseApp(ctk.CTk):
         thread = threading.Thread(target=task, daemon=True)
         thread.start()
 
+    def _on_analysis_object_change(self, _choice: str | None = None) -> None:
+        if self.analysis_object_var.get() == "多人":
+            self.multi_person_hint.configure(
+                text="多人属于高级用法：建议减少遮挡、录制明显同步动作，并在身高/体重中按人员顺序用逗号填写多个值。"
+            )
+        else:
+            self.multi_person_hint.configure(
+                text="默认单人、单次动作、多机位。多人属于高级用法，对遮挡、同步和人员匹配要求更高。"
+            )
+
+    def _refresh_project_status(self) -> None:
+        if self.workspace is None:
+            return
+        self.project_status_info = self.workspace.status()
+        if self.project_status_info.multi_person:
+            self.analysis_object_var.set("多人")
+            self._on_analysis_object_change()
+        lines = [
+            f"当前项目：{self.workspace.name}",
+            f"项目目录：{self.workspace.project_dir}",
+            f"输出目录：{self.workspace.output_dir}",
+            "",
+            *self.project_status_info.summary_lines(),
+            "",
+            "已有 Config.toml 时，GUI 默认不会自动覆盖。需要重新生成配置时，会先备份为 Config.backup_YYYYMMDD_HHMMSS.toml。",
+            "批处理项目会交给 Pose2Sim 官方层级配置读取逻辑，不会被强行转换成单项目配置。",
+        ]
+        self.project_status.delete("1.0", "end")
+        self.project_status.insert("end", "\n".join(lines) + "\n")
+
     def refresh_projects(self) -> None:
         self.project_list.configure(values=list_projects())
 
@@ -753,11 +882,7 @@ class Pose2SimChineseApp(ctk.CTk):
             name = self.project_name_entry.get()
             self.workspace = ProjectWorkspace(name)
             self.workspace.create()
-            self.project_status.delete("1.0", "end")
-            self.project_status.insert(
-                "end",
-                f"当前项目：{self.workspace.name}\n项目目录：{self.workspace.project_dir}\n输出目录：{self.workspace.output_dir}\n",
-            )
+            self._refresh_project_status()
             self.refresh_projects()
         except Exception as exc:
             messagebox.showerror("项目错误", str(exc))
@@ -779,6 +904,7 @@ class Pose2SimChineseApp(ctk.CTk):
                 for info in infos:
                     lines.append(f"{info.path.name}: {info.width}x{info.height}, fps={info.fps}, 原始旋转={info.rotation}°")
                 self.after(0, lambda: self._replace_text(self.video_text, "\n".join(lines) + "\n"))
+                self.after(0, self._refresh_project_status)
                 self._queue_log("video", "测试视频导入完成。")
                 self._log("测试视频导入完成。")
             except Exception as exc:
@@ -803,6 +929,7 @@ class Pose2SimChineseApp(ctk.CTk):
                 self._queue_log("calibration", "内参棋盘格视频导入完成:")
                 for path in outputs:
                     self._queue_log("calibration", str(path))
+                self.after(0, self._refresh_project_status)
                 self._log("内参棋盘格视频导入完成。")
             except Exception as exc:
                 self._queue_log("calibration", f"内参导入失败: {exc}")
@@ -826,6 +953,7 @@ class Pose2SimChineseApp(ctk.CTk):
                 self._queue_log("calibration", "外参视频/图片导入完成:")
                 for path in outputs:
                     self._queue_log("calibration", str(path))
+                self.after(0, self._refresh_project_status)
                 self._log("外参视频/图片导入完成。")
             except Exception as exc:
                 self._queue_log("calibration", f"外参导入失败: {exc}")
@@ -833,31 +961,57 @@ class Pose2SimChineseApp(ctk.CTk):
 
         self._thread(task, "开始导入外参资料...", "calibration")
 
-    def make_checkerboard(self) -> None:
+    def _make_checkerboard(self, *, square_entry: ctk.CTkEntry, page_size: str, purpose: str) -> None:
         try:
-            square = self._optional_float(self.square_entry.get()) or 35.0
-            png, pdf = generate_checkerboard(square_size_mm=square)
+            square = self._optional_float(square_entry.get()) or (35.0 if page_size == "A4" else 45.0)
+            png, pdf = generate_checkerboard(square_size_mm=square, page_size=page_size, purpose=purpose)
             messagebox.showinfo(
                 "棋盘格已生成",
-                f"PNG: {png}\nPDF: {pdf}\n\n打印时选择“实际大小/100%”，不要选择“适应页面”。打印后请测量一个方格边长。",
+                f"PNG: {png}\nPDF: {pdf}\n\n打印时选择“实际大小/100%”，不要选择“适应页面”。打印后请测量一个方格边长和 100 mm 检查尺。",
             )
             os.startfile(pdf)
         except Exception as exc:
             messagebox.showerror("棋盘格错误", str(exc))
 
+    def make_intrinsics_checkerboard(self) -> None:
+        self._make_checkerboard(square_entry=self.intrinsics_square_entry, page_size="A4", purpose="intrinsics")
+
+    def make_extrinsics_checkerboard(self) -> None:
+        self._make_checkerboard(square_entry=self.extrinsics_square_entry, page_size="A3", purpose="extrinsics")
+
     def save_config(self) -> None:
         try:
             workspace = self._current_workspace()
-            config = workspace.write_config(self._settings())
-            self._append(self.run_text, f"已保存配置：{config}")
+            config = self._write_config_with_prompt(workspace, self._settings())
+            if config is not None:
+                self._append(self.run_text, f"已保存配置：{config}")
+                self._refresh_project_status()
         except Exception as exc:
             messagebox.showerror("配置错误", str(exc))
+
+    def _write_config_with_prompt(self, workspace: ProjectWorkspace, settings: PipelineSettings) -> Path | None:
+        try:
+            return workspace.write_config(settings, overwrite=False)
+        except FileExistsError as exc:
+            overwrite = messagebox.askyesno(
+                "保护已有配置",
+                f"{exc}\n\n是否先备份已有 Config.toml，再用当前 GUI 参数覆盖？\n选择“否”会保留原配置。",
+            )
+            if not overwrite:
+                self._append(self.run_text, "已保留现有 Config.toml，未覆盖。")
+                return None
+            config = workspace.write_config(settings, overwrite=True, backup=True)
+            self._append(self.run_text, "已备份旧 Config.toml，并写入当前 GUI 配置。")
+            return config
 
     def run_pipeline(self) -> None:
         try:
             workspace = self._current_workspace()
             settings = self._settings()
-            workspace.write_config(settings)
+            config = self._write_config_with_prompt(workspace, settings)
+            if config is None:
+                return
+            self._refresh_project_status()
         except Exception as exc:
             messagebox.showerror("运行前检查失败", str(exc))
             return
@@ -865,8 +1019,49 @@ class Pose2SimChineseApp(ctk.CTk):
         def task() -> None:
             code = self.runner.run_all(workspace.project_dir, settings.skip_synchronization, self._log)
             self._log(f"完整流程结束，退出码 {code}。")
+            self.after(0, self._refresh_project_status)
 
         self._thread(task, "开始运行完整 Pose2Sim 流程...")
+
+    def run_existing_config(self) -> None:
+        try:
+            workspace = self._current_workspace()
+            if not (workspace.project_dir / "Config.toml").exists():
+                messagebox.showwarning("缺少配置", "当前项目没有 Config.toml。请先保存 GUI 配置，或打开已有 Pose2Sim 项目。")
+                return
+            skip_synchronization = self.skip_sync_var.get()
+            self._refresh_project_status()
+        except Exception as exc:
+            messagebox.showerror("运行前检查失败", str(exc))
+            return
+
+        def task() -> None:
+            code = self.runner.run_all(workspace.project_dir, skip_synchronization, self._log)
+            self._log(f"按现有 Config 运行结束，退出码 {code}。")
+            self.after(0, self._refresh_project_status)
+
+        self._thread(task, "开始按现有 Config.toml 运行 Pose2Sim...")
+
+    def run_missing_steps(self) -> None:
+        try:
+            workspace = self._current_workspace()
+            if not (workspace.project_dir / "Config.toml").exists():
+                messagebox.showwarning("缺少配置", "当前项目没有 Config.toml。请先保存配置，才能从缺失阶段继续。")
+                return
+            status = workspace.status()
+            skip_synchronization = self.skip_sync_var.get()
+            steps = status.missing_steps
+            self._append(self.run_text, "准备运行缺失阶段：" + " → ".join(steps))
+        except Exception as exc:
+            messagebox.showerror("运行前检查失败", str(exc))
+            return
+
+        def task() -> None:
+            code = self.runner.run_steps(workspace.project_dir, steps, skip_synchronization, self._log)
+            self._log(f"缺失阶段运行结束，退出码 {code}。")
+            self.after(0, self._refresh_project_status)
+
+        self._thread(task, "开始从缺失阶段继续运行 Pose2Sim...")
 
     def generate_reports(self) -> None:
         try:

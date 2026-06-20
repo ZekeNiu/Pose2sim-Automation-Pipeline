@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,16 +27,37 @@ DEFAULT_SCENE_POINTS = [
 def parse_scene_points(text: str) -> list[list[float]]:
     if not text.strip():
         return DEFAULT_SCENE_POINTS
-    try:
-        parsed = ast.literal_eval(text.strip())
-    except Exception as exc:
-        raise ValueError("场景点坐标格式应为 [[X,Y,Z], ...]。") from exc
-    if not isinstance(parsed, list) or len(parsed) < 6:
+    stripped = text.strip()
+    if stripped.startswith("["):
+        try:
+            parsed = ast.literal_eval(stripped)
+        except Exception as exc:
+            raise ValueError("场景点坐标格式应为 [[X,Y,Z], ...]，或表格行 P1, X, Y, Z, 说明。") from exc
+        if not isinstance(parsed, list):
+            raise ValueError("场景点坐标应为列表。")
+        raw_points = parsed
+    else:
+        raw_points = []
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [part.strip() for part in re.split(r"[\t,，]+", line) if part.strip()]
+            if not parts or parts[0].lower() in {"点编号", "编号", "point", "id"}:
+                continue
+            try:
+                float(parts[0])
+                point = parts[:3]
+            except ValueError:
+                point = parts[1:4]
+            raw_points.append(point)
+
+    if len(raw_points) < 6:
         raise ValueError("外参场景点至少需要 6 个点，建议 10 个以上。")
     points: list[list[float]] = []
-    for point in parsed:
-        if not isinstance(point, (list, tuple)) or len(point) != 3:
-            raise ValueError("每个场景点必须是 [X, Y, Z] 三个数。")
+    for point in raw_points:
+        if not isinstance(point, (list, tuple)) or len(point) < 3:
+            raise ValueError("每个场景点必须包含 X、Y、Z 三个真实世界坐标。")
         points.append([float(point[0]), float(point[1]), float(point[2])])
     return points
 
@@ -59,9 +81,9 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
     config: dict[str, Any] = {
         "project": {
             "project_dir": str(project_dir.resolve()),
-            "multi_person": False,
+            "multi_person": bool(settings.multi_person),
             "participant_height": settings.participant_height_value(),
-            "participant_mass": float(settings.participant_mass_kg),
+            "participant_mass": settings.participant_mass_value(),
             "frame_rate": "auto",
             "frame_range": settings.frame_range_value(),
             "exclude_from_batch": [],
@@ -100,7 +122,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
                 "save_debug_images": True,
                 "intrinsics": {
                     "overwrite_intrinsics": False,
-                    "intrinsics_extension": "mp4",
+                    "intrinsics_extension": settings.intrinsics_extension,
                     "extract_every_N_sec": 1,
                     "intrinsics_corners_nb": list(settings.intrinsics_inner_corners),
                     "intrinsics_square_size": float(settings.intrinsics_square_size_mm),
@@ -109,7 +131,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
                 "extrinsics": {
                     "calculate_extrinsics": True,
                     "extrinsics_method": extrinsics_method,
-                    "extrinsics_extension": "mp4",
+                    "extrinsics_extension": settings.extrinsics_extension,
                     "show_reprojection_error": True,
                     "moving_cameras": False,
                     "board": {

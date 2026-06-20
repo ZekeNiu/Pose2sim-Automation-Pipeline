@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pose2sim_pipeline_gui.mot import angle_columns, read_mot
 from pose2sim_pipeline_gui.paths import OUTPUTS_DIR, PROJECTS_DIR
-from pose2sim_pipeline_gui.report import generate_reports
+from pose2sim_pipeline_gui.report import generate_reports, generate_reports_for_project
 
 
 SAMPLE_MOT = """Coordinates
@@ -44,6 +44,50 @@ def test_generate_reports_from_mot() -> None:
         html = html_path.read_text(encoding="utf-8")
         assert "左膝屈伸" in html
         assert "质量诊断与解释边界" in html
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_generate_reports_from_multiple_mot_files() -> None:
+    project_dir = PROJECTS_DIR / "_test_report_multi"
+    output_dir = OUTPUTS_DIR / "_test_report_multi"
+    shutil.rmtree(project_dir, ignore_errors=True)
+    shutil.rmtree(output_dir, ignore_errors=True)
+    try:
+        (project_dir / "kinematics").mkdir(parents=True)
+        (project_dir / "kinematics" / "trial_P1.mot").write_text(SAMPLE_MOT, encoding="utf-8")
+        (project_dir / "kinematics" / "trial_P2.mot").write_text(SAMPLE_MOT, encoding="utf-8")
+
+        html_path, excel_path = generate_reports(project_dir, output_dir)
+
+        assert html_path.exists()
+        assert excel_path.exists()
+        html = html_path.read_text(encoding="utf-8")
+        assert "subject-select" in html
+        assert "P1" in html
+        assert "P2" in html
+    finally:
+        shutil.rmtree(project_dir, ignore_errors=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def test_generate_batch_report_index() -> None:
+    project_dir = PROJECTS_DIR / "_test_report_batch"
+    output_dir = OUTPUTS_DIR / "_test_report_batch"
+    shutil.rmtree(project_dir, ignore_errors=True)
+    shutil.rmtree(output_dir, ignore_errors=True)
+    try:
+        trial = project_dir / "Trial_1"
+        (trial / "kinematics").mkdir(parents=True)
+        (trial / "kinematics" / "sample.mot").write_text(SAMPLE_MOT, encoding="utf-8")
+
+        index_path, _excel_path = generate_reports_for_project(project_dir, output_dir)
+
+        assert index_path.exists()
+        html = index_path.read_text(encoding="utf-8")
+        assert "Trial_1" in html
+        assert "HTML 报告" in html
     finally:
         shutil.rmtree(project_dir, ignore_errors=True)
         shutil.rmtree(output_dir, ignore_errors=True)

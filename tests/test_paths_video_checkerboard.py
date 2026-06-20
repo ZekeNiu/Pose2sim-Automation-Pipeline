@@ -34,3 +34,19 @@ def test_generate_checkerboard_assets() -> None:
     finally:
         png.unlink(missing_ok=True)
         pdf.unlink(missing_ok=True)
+
+
+def test_generate_a3_extrinsics_checkerboard_assets() -> None:
+    png, pdf = generate_checkerboard(
+        output_dir=GENERATED_CHECKERBOARD_DIR,
+        page_size="A3",
+        purpose="extrinsics",
+        square_size_mm=45,
+    )
+    try:
+        assert png.exists()
+        assert pdf.exists()
+        assert "extrinsics_A3" in png.name
+    finally:
+        png.unlink(missing_ok=True)
+        pdf.unlink(missing_ok=True)

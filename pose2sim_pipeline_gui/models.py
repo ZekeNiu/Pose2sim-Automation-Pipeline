@@ -7,8 +7,11 @@ from pathlib import Path
 @dataclass
 class PipelineSettings:
     project_name: str
+    multi_person: bool = False
     participant_height_m: float | None = None
+    participant_heights_m: list[float] = field(default_factory=list)
     participant_mass_kg: float = 70.0
+    participant_masses_kg: list[float] = field(default_factory=list)
     default_height_m: float = 1.70
     frame_start: int | None = None
     frame_end: int | None = None
@@ -18,8 +21,10 @@ class PipelineSettings:
     calibration_mode: str = "scene"
     intrinsics_inner_corners: tuple[int, int] = (4, 7)
     intrinsics_square_size_mm: float = 35.0
+    intrinsics_extension: str = "mp4"
     extrinsics_inner_corners: tuple[int, int] = (4, 7)
-    extrinsics_square_size_mm: float = 35.0
+    extrinsics_square_size_mm: float = 45.0
+    extrinsics_extension: str = "mp4"
     extrinsics_board_position: str = "horizontal"
     scene_points_text: str = ""
     skip_synchronization: bool = False
@@ -41,8 +46,15 @@ class PipelineSettings:
             raise ValueError("结束帧必须大于开始帧。")
         return [int(self.frame_start), int(self.frame_end)]
 
-    def participant_height_value(self) -> str | float:
+    def participant_height_value(self) -> str | float | list[float]:
+        if self.multi_person and self.participant_heights_m:
+            return [float(v) for v in self.participant_heights_m]
         return "auto" if self.participant_height_m is None else float(self.participant_height_m)
+
+    def participant_mass_value(self) -> float | list[float]:
+        if self.multi_person and self.participant_masses_kg:
+            return [float(v) for v in self.participant_masses_kg]
+        return float(self.participant_mass_kg)
 
 
 @dataclass

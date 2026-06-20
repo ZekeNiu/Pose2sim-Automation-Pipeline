@@ -60,7 +60,7 @@ def _diagnostics(project_dir: Path) -> tuple[str, list[str], pd.DataFrame]:
         text = trc_file.read_text(encoding="utf-8", errors="replace")
         nan_count = text.lower().count("nan")
         if nan_count:
-            msg = f"{trc_file.name} 中发现 {nan_count} 个 NaN 文本，逆运动学可能受影响。"
+            msg = f"{trc_file.name} 中发现 {nan_count} 个 NaN 文本，逆运动学可能受到影响。"
             lines.append(msg)
             rows.append({"类别": "缺失值", "内容": msg})
 
@@ -84,7 +84,7 @@ def _copy_report_videos(project_dir: Path, media_dir: Path) -> list[Path]:
     return outputs
 
 
-def _build_figure(frame: pd.DataFrame, columns: list[str]) -> go.Figure:
+def _build_figure(frame: pd.DataFrame, columns: list[str], title: str) -> go.Figure:
     fig = go.Figure()
     for column in columns:
         meta = metadata_for(column)
@@ -98,7 +98,7 @@ def _build_figure(frame: pd.DataFrame, columns: list[str]) -> go.Figure:
             )
         )
     fig.update_layout(
-        title="关节活动度时间序列",
+        title=title,
         xaxis_title="时间 (秒)",
         yaxis_title="角度 (°)",
         hovermode="x unified",
@@ -123,13 +123,52 @@ def _stats_table(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
                 "平均值(°)": round(float(series.mean()), 3),
                 "活动范围ROM(°)": round(float(series.max() - series.min()), 3),
                 "运动平面": meta.plane,
-                "0度/中立位": meta.neutral,
+                "0°/中立位": meta.neutral,
                 "数值方向": meta.direction,
                 "计算定义": meta.definition,
                 "解释边界": meta.boundary,
             }
         )
     return pd.DataFrame(rows)
+
+
+def _mot_label(path: Path, index: int, total: int) -> str:
+    stem = path.stem
+    person_match = re.search(r"(?:^|[_-])(P\d+|person\d+)(?:$|[_-])", stem, flags=re.IGNORECASE)
+    if person_match:
+        return person_match.group(1).upper().replace("PERSON", "人员 ")
+    if total == 1:
+        return stem
+    return f"结果 {index}: {stem}"
+
+
+def _safe_sheet_name(name: str) -> str:
+    cleaned = re.sub(r"[\[\]\*\?/\\:]", "_", name)
+    return cleaned[:31] or "Sheet"
+
+
+def _definition_payload(stats: pd.DataFrame, prefix: str) -> dict[str, dict[str, str]]:
+    payload: dict[str, dict[str, str]] = {}
+    for _, row in stats.iterrows():
+        key = f"{prefix}::{row['指标']}"
+        payload[key] = {
+            "plane": str(row["运动平面"]),
+            "neutral": str(row["0°/中立位"]),
+            "direction": str(row["数值方向"]),
+            "definition": str(row["计算定义"]),
+            "boundary": str(row["解释边界"]),
+        }
+    return payload
+
+
+def _table_rows(stats: pd.DataFrame, prefix: str) -> str:
+    return "\n".join(
+        "<tr>"
+        f"<td>{html.escape(str(row['指标']))} <button class='info' data-key='{html.escape(prefix)}::{html.escape(str(row['指标']))}'>i</button></td>"
+        f"<td>{row['最小值(°)']}</td><td>{row['最大值(°)']}</td><td>{row['平均值(°)']}</td><td>{row['活动范围ROM(°)']}</td>"
+        "</tr>"
+        for _, row in stats.iterrows()
+    )
 
 
 def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
@@ -141,51 +180,81 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
     mot_files = sorted((project_dir / "kinematics").glob("*.mot"))
     if not mot_files:
         raise FileNotFoundError(f"未找到 .mot 关节角度文件: {project_dir / 'kinematics'}")
-    mot = read_mot(mot_files[0])
-    columns = ordered_columns(angle_columns(mot.frame))
-    if not columns:
-        raise ValueError(f".mot 文件中没有可报告的关节角度列: {mot.path}")
 
-    report_frame = mot.frame[["time", *columns]].copy()
-    stats = _stats_table(report_frame, columns)
-    summary, diagnostic_lines, diagnostics_df = _diagnostics(project_dir)
     videos = _copy_report_videos(project_dir, media_dir)
+    summary, diagnostic_lines, diagnostics_df = _diagnostics(project_dir)
+    definitions_payload: dict[str, dict[str, str]] = {}
+    subject_blocks: list[str] = []
+    selector_options: list[str] = []
+    first_excel_path = reports_dir / f"{project_dir.name}_关节活动度.xlsx"
 
-    display_frame = report_frame.rename(columns={c: metadata_for(c).zh for c in columns})
-    definitions = stats[
-        ["指标", "OpenSim列名", "运动平面", "0度/中立位", "数值方向", "计算定义", "解释边界"]
-    ].copy()
-    excel_path = reports_dir / f"{project_dir.name}_关节活动度.xlsx"
-    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        display_frame.to_excel(writer, sheet_name="逐帧关节活动度", index=False)
-        stats.to_excel(writer, sheet_name="统计摘要", index=False)
-        definitions.to_excel(writer, sheet_name="指标定义", index=False)
+    with pd.ExcelWriter(first_excel_path, engine="openpyxl") as writer:
+        for index, mot_path in enumerate(mot_files, start=1):
+            mot = read_mot(mot_path)
+            columns = ordered_columns(angle_columns(mot.frame))
+            if not columns:
+                raise ValueError(f".mot 文件中没有可报告的关节角度列: {mot.path}")
+
+            label = _mot_label(mot_path, index, len(mot_files))
+            block_id = f"subject-{index}"
+            report_frame = mot.frame[["time", *columns]].copy()
+            stats = _stats_table(report_frame, columns)
+            definitions = stats[
+                ["指标", "OpenSim列名", "运动平面", "0°/中立位", "数值方向", "计算定义", "解释边界"]
+            ].copy()
+            display_frame = report_frame.rename(columns={column: metadata_for(column).zh for column in columns})
+
+            if len(mot_files) == 1:
+                display_frame.to_excel(writer, sheet_name="逐帧关节活动度", index=False)
+                stats.to_excel(writer, sheet_name="统计摘要", index=False)
+                definitions.to_excel(writer, sheet_name="指标定义", index=False)
+            else:
+                display_frame.to_excel(writer, sheet_name=_safe_sheet_name(f"{label}_逐帧"), index=False)
+                stats.to_excel(writer, sheet_name=_safe_sheet_name(f"{label}_统计"), index=False)
+                definitions.to_excel(writer, sheet_name=_safe_sheet_name(f"{label}_定义"), index=False)
+
+            definitions_payload.update(_definition_payload(stats, block_id))
+            fig = _build_figure(report_frame, columns, f"{label} 关节活动度时间序列")
+            chart_html = pio.to_html(
+                fig,
+                full_html=False,
+                include_plotlyjs=True if index == 1 else False,
+                div_id=f"joint-chart-{index}",
+            )
+            selector_options.append(
+                f"<option value='{html.escape(block_id)}'>{html.escape(label)}</option>"
+            )
+            subject_blocks.append(
+                f"""
+      <section class="subject-block" id="{html.escape(block_id)}">
+        <h2>{html.escape(label)}</h2>
+        <div class="layout">
+          <div class="panel">{chart_html}</div>
+          <div class="panel">
+            <h3>同步视频</h3>
+            <div class="videos">{_video_tags(videos) or '<p>未找到可嵌入视频。</p>'}</div>
+          </div>
+        </div>
+        <section class="panel">
+          <h3>统计表</h3>
+          <table>
+            <thead><tr><th>指标</th><th>最小值(°)</th><th>最大值(°)</th><th>平均值(°)</th><th>ROM(°)</th></tr></thead>
+            <tbody>{_table_rows(stats, block_id)}</tbody>
+          </table>
+        </section>
+      </section>
+"""
+            )
+
         diagnostics_df.to_excel(writer, sheet_name="质量诊断", index=False)
 
-    fig = _build_figure(report_frame, columns)
-    chart_html = pio.to_html(fig, full_html=False, include_plotlyjs=True, div_id="joint-chart")
-    definitions_payload = {
-        row["指标"]: {
-            "plane": row["运动平面"],
-            "neutral": row["0度/中立位"],
-            "direction": row["数值方向"],
-            "definition": row["计算定义"],
-            "boundary": row["解释边界"],
-        }
-        for _, row in definitions.iterrows()
-    }
-    table_rows = "\n".join(
-        "<tr>"
-        f"<td>{html.escape(str(row['指标']))} <button class='info' data-name='{html.escape(str(row['指标']))}'>i</button></td>"
-        f"<td>{row['最小值(°)']}</td><td>{row['最大值(°)']}</td><td>{row['平均值(°)']}</td><td>{row['活动范围ROM(°)']}</td>"
-        "</tr>"
-        for _, row in stats.iterrows()
-    )
-    video_tags = "\n".join(
-        f"<video class='sync-video' controls preload='metadata' src='media/{html.escape(video.name)}'></video>"
-        for video in videos
-    )
     full_diag_html = "<br>".join(html.escape(line) for line in diagnostic_lines)
+    selector_html = ""
+    if len(mot_files) > 1:
+        selector_html = (
+            "<label for='subject-select'>人员/结果：</label>"
+            f"<select id='subject-select'>{''.join(selector_options)}</select>"
+        )
     html_path = reports_dir / f"{project_dir.name}_关节活动度.html"
     html_path.write_text(
         f"""<!doctype html>
@@ -199,6 +268,7 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
     header {{ padding: 24px 32px; background: #102033; color: white; }}
     main {{ padding: 24px 32px 48px; max-width: 1440px; margin: 0 auto; }}
     section {{ margin-bottom: 24px; }}
+    select {{ padding: 8px 10px; border: 1px solid #b8c2cc; border-radius: 6px; background: white; }}
     .summary {{ background: white; border-left: 5px solid #2563eb; padding: 16px; border-radius: 6px; }}
     .layout {{ display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.8fr); gap: 18px; align-items: start; }}
     .panel {{ background: white; border: 1px solid #dde3ea; border-radius: 8px; padding: 16px; }}
@@ -208,6 +278,7 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
     th, td {{ border-bottom: 1px solid #e5e7eb; padding: 10px; text-align: left; font-size: 14px; }}
     th {{ background: #eef2f7; }}
     .info {{ border: 1px solid #93a4b8; border-radius: 50%; width: 20px; height: 20px; cursor: pointer; background: white; color: #2563eb; }}
+    .subject-block[hidden] {{ display: none; }}
     dialog {{ border: none; border-radius: 8px; max-width: 760px; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,.25); }}
     button.primary {{ background: #2563eb; color: white; border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; }}
     @media (max-width: 980px) {{ .layout {{ grid-template-columns: 1fr; }} main {{ padding: 16px; }} }}
@@ -223,39 +294,38 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
       <strong>质量诊断与解释边界：</strong>{html.escape(summary)}
       <button class="primary" id="open-diagnostics">查看完整诊断</button>
     </section>
-    <section class="layout">
-      <div class="panel">{chart_html}</div>
-      <div class="panel">
-        <h2>同步视频</h2>
-        <div class="videos">{video_tags or '<p>未找到可嵌入视频。</p>'}</div>
-      </div>
-    </section>
-    <section class="panel">
-      <h2>统计表</h2>
-      <table>
-        <thead><tr><th>指标</th><th>最小值(°)</th><th>最大值(°)</th><th>平均值(°)</th><th>ROM(°)</th></tr></thead>
-        <tbody>{table_rows}</tbody>
-      </table>
-    </section>
+    <section class="panel">{selector_html or '当前报告包含 1 个可解析 .mot 文件。'}</section>
+    {''.join(subject_blocks)}
   </main>
   <dialog id="info-dialog"><h3 id="info-title"></h3><div id="info-body"></div><button class="primary" onclick="this.closest('dialog').close()">关闭</button></dialog>
   <dialog id="diagnostic-dialog"><h3>完整诊断</h3><p>{full_diag_html}</p><button class="primary" onclick="this.closest('dialog').close()">关闭</button></dialog>
   <script>
     const definitions = {json.dumps(definitions_payload, ensure_ascii=False)};
-    const videos = Array.from(document.querySelectorAll('.sync-video'));
-    const chart = document.getElementById('joint-chart');
-    if (chart) {{
+    const selector = document.getElementById('subject-select');
+    function updateSubject() {{
+      const active = selector ? selector.value : 'subject-1';
+      document.querySelectorAll('.subject-block').forEach(block => {{
+        block.hidden = block.id !== active;
+      }});
+    }}
+    if (selector) selector.addEventListener('change', updateSubject);
+    updateSubject();
+    document.querySelectorAll('[id^="joint-chart-"]').forEach(chart => {{
+      const block = chart.closest('.subject-block');
       chart.on('plotly_hover', (event) => {{
         const t = event.points && event.points.length ? Number(event.points[0].x) : null;
         if (Number.isFinite(t)) {{
-          videos.forEach(v => {{ if (Math.abs(v.currentTime - t) > 0.15) v.currentTime = Math.max(0, t); }});
+          block.querySelectorAll('.sync-video').forEach(v => {{
+            if (Math.abs(v.currentTime - t) > 0.15) v.currentTime = Math.max(0, t);
+          }});
         }}
       }});
-    }}
+    }});
     document.querySelectorAll('.info').forEach(btn => {{
       btn.addEventListener('click', () => {{
-        const name = btn.dataset.name;
-        const d = definitions[name] || {{}};
+        const key = btn.dataset.key;
+        const name = key.split('::').slice(1).join('::');
+        const d = definitions[key] || {{}};
         document.getElementById('info-title').textContent = name;
         document.getElementById('info-body').innerHTML =
           `<p><b>运动平面：</b>${{d.plane || ''}}</p>` +
@@ -275,5 +345,73 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
 """,
         encoding="utf-8",
     )
-    return html_path, excel_path
+    return html_path, first_excel_path
 
+
+def _video_tags(videos: list[Path]) -> str:
+    return "\n".join(
+        f"<video class='sync-video' controls preload='metadata' src='media/{html.escape(video.name)}'></video>"
+        for video in videos
+    )
+
+
+def generate_reports_for_project(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
+    assert_under_workspace(project_dir)
+    assert_under_workspace(output_dir)
+    root_mots = sorted((project_dir / "kinematics").glob("*.mot"))
+    if root_mots:
+        return generate_reports(project_dir, output_dir)
+
+    child_dirs = [
+        child
+        for child in sorted(project_dir.iterdir())
+        if child.is_dir() and sorted((child / "kinematics").glob("*.mot"))
+    ]
+    if not child_dirs:
+        raise FileNotFoundError(f"未找到可生成中文报告的 .mot 文件: {project_dir}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    index_rows: list[str] = []
+    first_excel: Path | None = None
+    for child in child_dirs:
+        html_path, excel_path = generate_reports(child, output_dir / child.name)
+        if first_excel is None:
+            first_excel = excel_path
+        rel_html = html_path.relative_to(output_dir).as_posix()
+        rel_excel = excel_path.relative_to(output_dir).as_posix()
+        index_rows.append(
+            "<tr>"
+            f"<td>{html.escape(child.name)}</td>"
+            f"<td><a href='{html.escape(rel_html)}'>HTML 报告</a></td>"
+            f"<td><a href='{html.escape(rel_excel)}'>Excel 报告</a></td>"
+            "</tr>"
+        )
+
+    index_path = output_dir / "index.html"
+    index_path.write_text(
+        f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(project_dir.name)} 批处理报告入口</title>
+  <style>
+    body {{ font-family: "Microsoft YaHei", Arial, sans-serif; margin: 32px; color: #1f2933; }}
+    table {{ border-collapse: collapse; width: 100%; max-width: 920px; }}
+    th, td {{ border-bottom: 1px solid #e5e7eb; padding: 10px; text-align: left; }}
+    th {{ background: #eef2f7; }}
+  </style>
+</head>
+<body>
+  <h1>{html.escape(project_dir.name)} 批处理报告入口</h1>
+  <p>以下 Trial 根据可解析的 .mot 文件分别生成。GUI 没有按项目名称做特殊处理。</p>
+  <table>
+    <thead><tr><th>Trial</th><th>HTML</th><th>Excel</th></tr></thead>
+    <tbody>{''.join(index_rows)}</tbody>
+  </table>
+</body>
+</html>
+""",
+        encoding="utf-8",
+    )
+    return index_path, first_excel if first_excel is not None else index_path

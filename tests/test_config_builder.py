@@ -35,6 +35,10 @@ def test_build_config_writes_exposed_gui_parameters() -> None:
         feet_on_floor=True,
         right_left_symmetry=False,
         extrinsics_board_position="vertical",
+        intrinsics_square_size_mm=32.0,
+        intrinsics_extension="jpg",
+        extrinsics_square_size_mm=45.0,
+        extrinsics_extension="png",
         sync_search_range_seconds=3.5,
         filter_cutoff_hz=8.0,
     )
@@ -44,6 +48,10 @@ def test_build_config_writes_exposed_gui_parameters() -> None:
     assert config["pose"]["mode"] == "performance"
     assert config["pose"]["det_frequency"] == 2
     assert config["pose"]["save_video"] == "none"
+    assert config["calibration"]["calculate"]["intrinsics"]["intrinsics_extension"] == "jpg"
+    assert config["calibration"]["calculate"]["intrinsics"]["intrinsics_square_size"] == 32.0
+    assert config["calibration"]["calculate"]["extrinsics"]["extrinsics_extension"] == "png"
+    assert config["calibration"]["calculate"]["extrinsics"]["board"]["extrinsics_square_size"] == 45.0
     assert config["calibration"]["calculate"]["extrinsics"]["board"]["board_position"] == "vertical"
     assert config["synchronization"]["time_range_around_maxspeed"] == 3.5
     assert config["markerAugmentation"]["feet_on_floor"] is True
@@ -55,6 +63,39 @@ def test_board_calibration_switches_extrinsics_method() -> None:
     settings = PipelineSettings(project_name="demo", calibration_mode="board", scene_points_text="not a scene point list")
     config = build_config_dict(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), settings)
     assert config["calibration"]["calculate"]["extrinsics"]["extrinsics_method"] == "board"
+
+
+def test_multi_person_config_writes_participant_lists() -> None:
+    settings = PipelineSettings(
+        project_name="demo",
+        multi_person=True,
+        participant_heights_m=[1.80, 1.65],
+        participant_masses_kg=[82.0, 60.0],
+    )
+    config = build_config_dict(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), settings)
+
+    assert config["project"]["multi_person"] is True
+    assert config["project"]["participant_height"] == [1.8, 1.65]
+    assert config["project"]["participant_mass"] == [82.0, 60.0]
+
+
+def test_parse_scene_points_accepts_table_rows() -> None:
+    text = """点编号,X,Y,Z,现场说明
+P1,0,0,0,原点
+P2,1,0,0,前方1米
+P3,0,1,0,左方1米
+P4,0,0,1,上方1米
+P5,1,1,0,左前
+P6,1,0,1,前上
+"""
+    assert parse_scene_points(text) == [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 0.0, 1.0],
+    ]
 
 
 def test_parse_scene_points_rejects_short_or_bad_values() -> None:

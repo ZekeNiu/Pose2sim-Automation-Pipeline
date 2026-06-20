@@ -36,6 +36,17 @@ class PipelineRunner:
             args.append("--skip-synchronization")
         return self._run(args, on_log)
 
+    def run_steps(
+        self,
+        project_dir: Path,
+        steps: list[str],
+        skip_synchronization: bool,
+        on_log: LogCallback | None = None,
+    ) -> int:
+        args = ["run", "--project-dir", str(project_dir), "--steps", *steps]
+        if skip_synchronization:
+            args.append("--skip-synchronization")
+        return self._run(args, on_log)
+
     def generate_reports(self, project_dir: Path, on_log: LogCallback | None = None) -> int:
         return self._run(["reports", "--project-dir", str(project_dir)], on_log)
-
