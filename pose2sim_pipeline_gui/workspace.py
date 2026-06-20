@@ -4,6 +4,9 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+import toml
+
+from .config_adapter import ConfigApplyResult, config_text, load_config, merged_config
 from .config_builder import write_config
 from .models import PipelineSettings
 from .paths import PROJECTS_DIR, assert_under_workspace, ensure_workspace, output_dir, project_dir, sanitize_project_name
@@ -57,6 +60,22 @@ class ProjectWorkspace:
         if config_path.exists() and backup:
             self.backup_config()
         return write_config(self.project_dir, settings)
+
+    def apply_settings_to_config(self, settings: PipelineSettings) -> ConfigApplyResult:
+        self.create()
+        config_path = self.project_dir / "Config.toml"
+        if not config_path.exists():
+            return ConfigApplyResult(path=write_config(self.project_dir, settings), changed=True)
+
+        existing = load_config(config_path)
+        merged = merged_config(self.project_dir, existing, settings)
+        if config_text(existing) == config_text(merged):
+            return ConfigApplyResult(path=config_path, changed=False)
+
+        backup_path = self.backup_config()
+        with config_path.open("w", encoding="utf-8") as handle:
+            toml.dump(merged, handle)
+        return ConfigApplyResult(path=config_path, changed=True, backup_path=backup_path)
 
     def calibration_extension(self, kind: str) -> str:
         if kind not in {"intrinsics", "extrinsics"}:

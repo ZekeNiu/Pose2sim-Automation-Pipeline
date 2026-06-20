@@ -43,3 +43,22 @@ def test_workspace_imports_calibration_images_without_ffmpeg(tmp_path: Path) -> 
     finally:
         shutil.rmtree(workspace.project_dir, ignore_errors=True)
         shutil.rmtree(workspace.output_dir, ignore_errors=True)
+
+
+def test_apply_settings_to_config_only_backs_up_when_changed() -> None:
+    workspace = ProjectWorkspace("_test_workspace_apply_config")
+    shutil.rmtree(workspace.project_dir, ignore_errors=True)
+    try:
+        settings = PipelineSettings(project_name=workspace.name, participant_height_m=1.75)
+        first = workspace.apply_settings_to_config(settings)
+        second = workspace.apply_settings_to_config(settings)
+        changed = workspace.apply_settings_to_config(PipelineSettings(project_name=workspace.name, participant_height_m=1.80))
+
+        assert first.changed is True
+        assert second.changed is False
+        assert changed.changed is True
+        assert changed.backup_path is not None
+        assert changed.backup_path.exists()
+    finally:
+        shutil.rmtree(workspace.project_dir, ignore_errors=True)
+        shutil.rmtree(workspace.output_dir, ignore_errors=True)

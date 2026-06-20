@@ -92,7 +92,6 @@ class ProjectStatus:
             lines.extend(f"- {path.relative_to(self.project_dir)}" for path in self.mot_files[:10])
             if len(self.mot_files) > 10:
                 lines.append(f"- 另有 {len(self.mot_files) - 10} 个 .mot 文件")
-        lines.append("说明：GUI 只按通用目录和 Config 内容识别状态，不按 Demo 名称做特殊处理。")
         return lines
 
 

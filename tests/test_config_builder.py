@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from pose2sim_pipeline_gui.config_builder import build_config_dict, parse_scene_points
+from pose2sim_pipeline_gui.config_adapter import merged_config, settings_from_config
 from pose2sim_pipeline_gui.models import PipelineSettings
 
 
@@ -114,3 +115,19 @@ def test_gui_labels_map_to_pose2sim_internal_values() -> None:
     assert BOARD_POSITION_OPTIONS["水平放置（地面/地垫）"] == "horizontal"
     assert BOARD_POSITION_OPTIONS["垂直放置（墙面/支架）"] == "vertical"
     assert SPEED_PRESET_OPTIONS["更准（performance，较慢）"] == "accurate"
+
+
+def test_existing_convert_config_round_trips_without_forcing_calculate() -> None:
+    existing = {
+        "project": {"multi_person": False, "participant_height": "auto", "participant_mass": 70.0, "frame_range": "auto"},
+        "pose": {"pose_model": "Body_with_feet", "mode": "balanced", "det_frequency": 4, "save_video": "to_video"},
+        "calibration": {"calibration_type": "convert", "convert": {"convert_from": "qualisys", "custom_field": True}},
+        "synchronization": {"approx_time_maxspeed": "auto", "time_range_around_maxspeed": 2.0},
+        "kinematics": {"use_augmentation": True, "right_left_symmetry": True, "default_height": 1.7},
+    }
+    settings = settings_from_config("demo", existing)
+    merged = merged_config(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), existing, settings)
+
+    assert settings.calibration_mode == "convert"
+    assert merged["calibration"]["calibration_type"] == "convert"
+    assert merged["calibration"]["convert"]["custom_field"] is True

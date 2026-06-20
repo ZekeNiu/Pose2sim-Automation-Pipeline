@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
 from .checkerboard import generate_checkerboard
+from .config_adapter import load_config, settings_from_config
 from .config_builder import DEFAULT_SCENE_POINTS
 from .environment import check_environment, update_pose2sim
 from .models import PipelineSettings
@@ -26,6 +27,7 @@ STEP_TABS = ["环境", "项目", "校准", "视频", "参数", "运行"]
 CALIBRATION_MODE_OPTIONS = {
     "外参：场景点（推荐，精度更稳）": "scene",
     "外参：棋盘格（更简单，要求所有相机清楚看到大棋盘格）": "board",
+    "使用已有/外部校准（不重新计算）": "convert",
 }
 CALIBRATION_MODE_LABELS = {value: label for label, value in CALIBRATION_MODE_OPTIONS.items()}
 
@@ -621,11 +623,7 @@ class Pose2SimChineseApp(ctk.CTk):
         self._title(tab, "6. 运行与输出", 0)
         buttons = ctk.CTkFrame(tab, fg_color="transparent")
         buttons.grid(row=1, column=0, sticky="ew", padx=18, pady=8)
-        ctk.CTkButton(buttons, text="保存 Config.toml", command=self.save_config).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(buttons, text="保存配置并运行完整流程", command=self.run_pipeline).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(buttons, text="按现有 Config 运行", command=self.run_existing_config).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(buttons, text="从缺失阶段继续", command=self.run_missing_steps).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(buttons, text="仅生成报告", command=self.generate_reports).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="运行 / 更新输出", command=self.run_pipeline).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="打开输出目录", command=self.open_output_dir).pack(side="left")
         self.run_text = ctk.CTkTextbox(tab)
         self.run_text.grid(row=2, column=0, sticky="nsew", padx=18, pady=12)
@@ -640,6 +638,53 @@ class Pose2SimChineseApp(ctk.CTk):
             self.workspace = ProjectWorkspace(name)
             self.workspace.create()
         return self.workspace
+
+    @staticmethod
+    def _set_entry_value(entry: ctk.CTkEntry, value: str) -> None:
+        entry.delete(0, "end")
+        entry.insert(0, value)
+
+    @staticmethod
+    def _set_combo_by_value(combo: ctk.CTkComboBox, options: dict[str, str], value: str) -> None:
+        label = next((label for label, internal in options.items() if internal == value), None)
+        combo.set(label or value)
+
+    def _apply_existing_config_to_gui(self) -> None:
+        if self.workspace is None:
+            return
+        config_path = self.workspace.project_dir / "Config.toml"
+        if not config_path.exists():
+            return
+        settings = settings_from_config(self.workspace.name, load_config(config_path))
+        self.analysis_object_var.set("多人" if settings.multi_person else "单人")
+        self._on_analysis_object_change()
+        height_values = settings.participant_heights_m if settings.multi_person and settings.participant_heights_m else []
+        if height_values:
+            self._set_entry_value(self.height_entry, ", ".join(f"{value:g}" for value in height_values))
+        else:
+            self._set_entry_value(self.height_entry, "" if settings.participant_height_m is None else f"{settings.participant_height_m:g}")
+        mass_values = settings.participant_masses_kg if settings.multi_person and settings.participant_masses_kg else []
+        self._set_entry_value(
+            self.mass_entry,
+            ", ".join(f"{value:g}" for value in mass_values) if mass_values else f"{settings.participant_mass_kg:g}",
+        )
+        self._set_entry_value(self.frame_start_entry, "" if settings.frame_start is None else str(settings.frame_start))
+        self._set_entry_value(self.frame_end_entry, "" if settings.frame_end is None else str(settings.frame_end))
+        self._set_entry_value(self.sync_times_entry, ", ".join(f"{value:g}" for value in settings.sync_times_seconds))
+        self._set_combo_by_value(self.pose_model_box, POSE_MODEL_OPTIONS, settings.pose_model)
+        self._set_combo_by_value(self.speed_box, SPEED_PRESET_OPTIONS, settings.speed_preset)
+        self._set_combo_by_value(self.calibration_mode, CALIBRATION_MODE_OPTIONS, settings.calibration_mode)
+        self._set_entry_value(self.intrinsics_square_entry, f"{settings.intrinsics_square_size_mm:g}")
+        self._set_entry_value(self.extrinsics_square_entry, f"{settings.extrinsics_square_size_mm:g}")
+        self._set_combo_by_value(self.board_position_box, BOARD_POSITION_OPTIONS, settings.extrinsics_board_position)
+        self.marker_aug_var.set(settings.marker_augmentation)
+        self.save_overlay_var.set(settings.save_overlay_video)
+        self.feet_floor_var.set(settings.feet_on_floor)
+        self.symmetry_var.set(settings.right_left_symmetry)
+        self.simple_model_var.set(settings.use_simple_model)
+        self._set_entry_value(self.sync_range_entry, f"{settings.sync_search_range_seconds:g}")
+        self._set_entry_value(self.filter_entry, f"{settings.filter_cutoff_hz:g}")
+        self._on_calibration_mode_change()
 
     def _settings(self) -> PipelineSettings:
         workspace = self._current_workspace()
@@ -766,12 +811,16 @@ class Pose2SimChineseApp(ctk.CTk):
     def _on_calibration_mode_change(self, _choice: str | None = None) -> None:
         if not hasattr(self, "scene_points_frame"):
             return
-        if self._calibration_mode_value() == "scene":
+        mode = self._calibration_mode_value()
+        if mode == "scene":
             self.scene_points_frame.grid()
             self.board_position_frame.grid_remove()
-        else:
+        elif mode == "board":
             self.scene_points_frame.grid_remove()
             self.board_position_frame.grid()
+        else:
+            self.scene_points_frame.grid_remove()
+            self.board_position_frame.grid_remove()
 
     def _toggle_advanced_parameters(self) -> None:
         if self.advanced_frame.winfo_ismapped():
@@ -861,7 +910,7 @@ class Pose2SimChineseApp(ctk.CTk):
             "",
             *self.project_status_info.summary_lines(),
             "",
-            "已有 Config.toml 时，GUI 默认不会自动覆盖。需要重新生成配置时，会先备份为 Config.backup_YYYYMMDD_HHMMSS.toml。",
+            "已有 Config.toml 时，GUI 会先把参数填回界面；不改参数运行不会重写 Config，改参数运行会先自动备份。",
             "批处理项目会交给 Pose2Sim 官方层级配置读取逻辑，不会被强行转换成单项目配置。",
         ]
         self.project_status.delete("1.0", "end")
@@ -882,6 +931,7 @@ class Pose2SimChineseApp(ctk.CTk):
             name = self.project_name_entry.get()
             self.workspace = ProjectWorkspace(name)
             self.workspace.create()
+            self._apply_existing_config_to_gui()
             self._refresh_project_status()
             self.refresh_projects()
         except Exception as exc:
@@ -1008,20 +1058,35 @@ class Pose2SimChineseApp(ctk.CTk):
         try:
             workspace = self._current_workspace()
             settings = self._settings()
-            config = self._write_config_with_prompt(workspace, settings)
-            if config is None:
-                return
+            status_before = workspace.status()
+            config_result = workspace.apply_settings_to_config(settings)
+            if config_result.changed:
+                if config_result.backup_path:
+                    self._append(self.run_text, f"Config 已变化，已备份旧配置：{config_result.backup_path}")
+                else:
+                    self._append(self.run_text, f"已生成配置：{config_result.path}")
+            else:
+                self._append(self.run_text, "Config 未变化，将按现有配置运行/更新输出。")
             self._refresh_project_status()
         except Exception as exc:
             messagebox.showerror("运行前检查失败", str(exc))
             return
 
         def task() -> None:
-            code = self.runner.run_all(workspace.project_dir, settings.skip_synchronization, self._log)
-            self._log(f"完整流程结束，退出码 {code}。")
+            if status_before.has_kinematics and not config_result.changed:
+                self._log("检测到已有 .mot，Config 未变化：仅更新报告和输出目录。")
+                code = self.runner.generate_reports(workspace.project_dir, self._log)
+            elif config_result.changed:
+                self._log("Config 已更新：重新运行完整 Pose2Sim 流程。")
+                code = self.runner.run_all(workspace.project_dir, settings.skip_synchronization, self._log)
+            else:
+                steps = workspace.status().missing_steps
+                self._log("从缺失阶段继续：" + " → ".join(steps))
+                code = self.runner.run_steps(workspace.project_dir, steps, settings.skip_synchronization, self._log)
+            self._log(f"运行 / 更新输出结束，退出码 {code}。")
             self.after(0, self._refresh_project_status)
 
-        self._thread(task, "开始运行完整 Pose2Sim 流程...")
+        self._thread(task, "开始运行 / 更新输出...")
 
     def run_existing_config(self) -> None:
         try:

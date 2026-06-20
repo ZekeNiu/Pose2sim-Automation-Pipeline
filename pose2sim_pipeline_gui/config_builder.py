@@ -76,7 +76,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
     if settings.sync_times_seconds:
         sync_value = [float(v) for v in settings.sync_times_seconds]
 
-    extrinsics_method = "scene" if settings.calibration_mode == "scene" else "board"
+    extrinsics_method = "board" if settings.calibration_mode == "board" else "scene"
     scene_points = parse_scene_points(settings.scene_points_text) if extrinsics_method == "scene" else DEFAULT_SCENE_POINTS
     config: dict[str, Any] = {
         "project": {
@@ -117,7 +117,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
             "filter_order": 4,
         },
         "calibration": {
-            "calibration_type": "calculate",
+            "calibration_type": "convert" if settings.calibration_mode == "convert" else "calculate",
             "calculate": {
                 "save_debug_images": True,
                 "intrinsics": {
