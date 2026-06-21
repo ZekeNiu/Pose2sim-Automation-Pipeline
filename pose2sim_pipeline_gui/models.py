@@ -40,8 +40,8 @@ class PipelineSettings:
     feet_on_floor: bool = False
     right_left_symmetry: bool = True
     filter_cutoff_hz: float = 6.0
-    large_hip_knee_angles: float = 135.0
-    trimmed_extrema_percent: float = 0.5
+    large_hip_knee_angles: float = 90.0
+    trimmed_extrema_percent: float = 50.0
 
     def frame_range_value(self) -> str | list[int]:
         if self.frame_start is None or self.frame_end is None:
@@ -77,14 +77,19 @@ class EnvironmentStatus:
     toml_version: str | None = None
     ffprobe_path: str | None = None
     warnings: list[str] = field(default_factory=list)
+    python_version: str | None = None
+    python_version_info: tuple[int, int, int] | None = None
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
     def to_chinese_lines(self) -> list[str]:
+        python_label = f"{self.python_path}"
+        if self.python_version:
+            python_label = f"{python_label} ({self.python_version})"
         lines = [
-            f"Python: {self.python_path}",
+            f"Python: {python_label}",
             f"Pose2Sim: {self.pose2sim_version or '未检测到'}",
             f"OpenSim: {self.opensim_version or '未检测到'}",
             f"customtkinter: {self.customtkinter_version or '未检测到'}",

@@ -6,9 +6,13 @@ import sys
 import traceback
 from pathlib import Path
 
+from .environment import pose2sim_uses_percent_trimmed_extrema
 from .paths import WORKSPACE_ROOT, output_dir
 from .report import generate_reports_for_project
 
+
+CALIBRATION_VIDEO_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "wmv", "m4v", "webm"}
+CALIBRATION_IMAGE_EXTENSIONS = ("png", "jpg", "jpeg", "bmp", "tif", "tiff")
 
 STEP_LABELS = {
     "calibration": "相机校准",
@@ -40,6 +44,35 @@ def should_run_marker_augmentation(config_dicts: list[dict]) -> bool:
     return any(bool(config.get("kinematics", {}).get("use_augmentation", True)) for config in config_dicts)
 
 
+def _intrinsics_image_extension(project_dir: Path | None) -> str | None:
+    if project_dir is None:
+        return None
+    intrinsics_dir = project_dir / "calibration" / "intrinsics"
+    if not intrinsics_dir.exists():
+        return None
+    for extension in CALIBRATION_IMAGE_EXTENSIONS:
+        if any(intrinsics_dir.rglob(f"*.{extension}")):
+            return extension
+    return None
+
+
+def normalize_config_dicts_for_runtime(config_dicts: list[dict], project_dir: Path | None = None) -> None:
+    intrinsics_image_extension = _intrinsics_image_extension(project_dir)
+    uses_percent_trimmed_extrema = pose2sim_uses_percent_trimmed_extrema()
+    for config in config_dicts:
+        if uses_percent_trimmed_extrema:
+            kinematics = config.get("kinematics", {})
+            value = kinematics.get("trimmed_extrema_percent")
+            if isinstance(value, (int, float)) and 0 < value <= 1:
+                kinematics["trimmed_extrema_percent"] = float(value) * 100
+
+        if intrinsics_image_extension:
+            intrinsics = config.get("calibration", {}).get("calculate", {}).get("intrinsics", {})
+            extension = str(intrinsics.get("intrinsics_extension", "")).lower().lstrip(".")
+            if extension in CALIBRATION_VIDEO_EXTENSIONS:
+                intrinsics["intrinsics_extension"] = intrinsics_image_extension
+
+
 def run_steps(project_dir: Path, steps: list[str], skip_synchronization: bool = False) -> None:
     from Pose2Sim.Pose2Sim import Pose2SimPipeline
 
@@ -48,6 +81,7 @@ def run_steps(project_dir: Path, steps: list[str], skip_synchronization: bool = 
     if not (project_dir / "Config.toml").exists():
         raise FileNotFoundError(f"未找到配置文件: {project_dir / 'Config.toml'}")
     pipeline = Pose2SimPipeline(str(project_dir))
+    normalize_config_dicts_for_runtime(pipeline.config_dicts, project_dir)
     marker_aug_failed = False
     stage_methods = {
         "calibration": pipeline.calibration,

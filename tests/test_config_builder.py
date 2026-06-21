@@ -28,9 +28,28 @@ def test_build_config_defaults_for_single_person_phone_workflow() -> None:
     assert config["markerAugmentation"]["feet_on_floor"] is False
     assert config["kinematics"]["use_augmentation"] is True
     assert config["kinematics"]["right_left_symmetry"] is True
+    assert config["kinematics"]["filter_ik"] is False
+    assert config["kinematics"]["ik_filter_type"] == "acc_minimizing"
 
 
-def test_build_config_writes_exposed_gui_parameters() -> None:
+def test_build_config_writes_new_pose2sim_scaling_defaults(monkeypatch) -> None:
+    monkeypatch.setattr("pose2sim_pipeline_gui.config_builder.pose2sim_uses_percent_trimmed_extrema", lambda: True)
+    config = build_config_dict(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), PipelineSettings(project_name="demo"))
+
+    assert config["kinematics"]["large_hip_knee_angles"] == 90.0
+    assert config["kinematics"]["trimmed_extrema_percent"] == 50.0
+
+
+def test_build_config_keeps_old_trimmed_extrema_units_for_pose2sim_01043(monkeypatch) -> None:
+    monkeypatch.setattr("pose2sim_pipeline_gui.config_builder.pose2sim_uses_percent_trimmed_extrema", lambda: False)
+    config = build_config_dict(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), PipelineSettings(project_name="demo"))
+
+    assert config["kinematics"]["large_hip_knee_angles"] == 90.0
+    assert config["kinematics"]["trimmed_extrema_percent"] == 0.5
+
+
+def test_build_config_writes_exposed_gui_parameters(monkeypatch) -> None:
+    monkeypatch.setattr("pose2sim_pipeline_gui.config_builder.pose2sim_uses_percent_trimmed_extrema", lambda: True)
     settings = PipelineSettings(
         project_name="demo",
         pose_model="Whole_body_wrist",
@@ -48,6 +67,7 @@ def test_build_config_writes_exposed_gui_parameters() -> None:
         tracking_mode="sports2d",
         tracked_keypoint="Hip",
         manual_sync_selection=True,
+        trimmed_extrema_percent=40.0,
     )
     config = build_config_dict(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), settings)
 
@@ -65,6 +85,7 @@ def test_build_config_writes_exposed_gui_parameters() -> None:
     assert config["personAssociation"]["single_person"]["tracked_keypoint"] == "Hip"
     assert config["markerAugmentation"]["feet_on_floor"] is True
     assert config["kinematics"]["right_left_symmetry"] is False
+    assert config["kinematics"]["trimmed_extrema_percent"] == 40.0
     assert config["filtering"]["butterworth"]["cut_off_frequency"] == 8.0
 
 
@@ -215,3 +236,28 @@ def test_existing_convert_config_round_trips_without_forcing_calculate() -> None
     assert settings.tracked_keypoint == "Hip"
     assert merged["calibration"]["calibration_type"] == "convert"
     assert merged["calibration"]["convert"]["custom_field"] is True
+
+
+def test_existing_old_trimmed_extrema_ratio_is_read_as_percent(monkeypatch) -> None:
+    monkeypatch.setattr("pose2sim_pipeline_gui.config_builder.pose2sim_uses_percent_trimmed_extrema", lambda: True)
+    existing = {
+        "project": {"multi_person": False, "participant_height": "auto", "participant_mass": 70.0, "frame_range": "auto"},
+        "pose": {"pose_model": "Body_with_feet", "mode": "balanced", "det_frequency": 4, "save_video": "to_video"},
+        "kinematics": {"trimmed_extrema_percent": 0.5, "large_hip_knee_angles": 135.0},
+    }
+
+    settings = settings_from_config("demo", existing)
+    merged = merged_config(Path("D:/Application/Biomechanics/Pose2sim_Pipeline/projects/demo"), existing, settings)
+
+    assert settings.trimmed_extrema_percent == 50.0
+    assert merged["kinematics"]["trimmed_extrema_percent"] == 50.0
+    assert merged["kinematics"]["large_hip_knee_angles"] == 135.0
+    assert merged["kinematics"]["filter_ik"] is False
+    assert merged["kinematics"]["ik_filter_type"] == "acc_minimizing"
+    assert merged["filtering"]["filter_ik"] is False
+
+
+def test_gui_labels_include_lower_body_option() -> None:
+    from pose2sim_pipeline_gui.app import POSE_MODEL_OPTIONS
+
+    assert POSE_MODEL_OPTIONS["下肢模式（Pose2Sim 0.10.44+）"] == "Lower_body"

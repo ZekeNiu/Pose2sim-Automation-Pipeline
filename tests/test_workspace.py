@@ -45,6 +45,51 @@ def test_workspace_imports_calibration_images_without_ffmpeg(tmp_path: Path) -> 
         shutil.rmtree(workspace.output_dir, ignore_errors=True)
 
 
+def test_intrinsics_calibration_extension_prefers_images() -> None:
+    workspace = ProjectWorkspace("_test_workspace_intrinsics_extension")
+    shutil.rmtree(workspace.project_dir, ignore_errors=True)
+    try:
+        cam_dir = workspace.project_dir / "calibration" / "intrinsics" / "cam01"
+        cam_dir.mkdir(parents=True, exist_ok=True)
+        (cam_dir / "cam01_intrinsics.mp4").write_bytes(b"video")
+        (cam_dir / "cam01_intrinsics_00000.png").write_bytes(b"image")
+
+        assert workspace.calibration_extension("intrinsics") == "png"
+    finally:
+        shutil.rmtree(workspace.project_dir, ignore_errors=True)
+        shutil.rmtree(workspace.output_dir, ignore_errors=True)
+
+
+def test_prepare_intrinsics_image_frames_keeps_video_and_reports_counts(monkeypatch) -> None:
+    workspace = ProjectWorkspace("_test_workspace_prepare_intrinsics")
+    shutil.rmtree(workspace.project_dir, ignore_errors=True)
+    try:
+        cam_dir = workspace.project_dir / "calibration" / "intrinsics" / "cam01"
+        cam_dir.mkdir(parents=True, exist_ok=True)
+        video_path = cam_dir / "cam01_intrinsics.mp4"
+        video_path.write_bytes(b"video")
+
+        def fake_extract(video_file: Path, output_dir: Path, *, extract_every_N_sec: float, overwrite: bool):
+            frame = output_dir / "cam01_intrinsics_00000.png"
+            frame.write_bytes(b"image")
+            return [frame]
+
+        monkeypatch.setattr(
+            "pose2sim_pipeline_gui.workspace.pose2sim_intrinsics_video_extraction_bug_present",
+            lambda: True,
+        )
+        monkeypatch.setattr("pose2sim_pipeline_gui.workspace.extract_calibration_video_frames", fake_extract)
+
+        prepared = workspace.prepare_intrinsics_image_frames()
+
+        assert prepared == {"cam01": 1}
+        assert video_path.exists()
+        assert (cam_dir / "cam01_intrinsics_00000.png").exists()
+    finally:
+        shutil.rmtree(workspace.project_dir, ignore_errors=True)
+        shutil.rmtree(workspace.output_dir, ignore_errors=True)
+
+
 def test_workspace_imports_external_calibration_files(tmp_path: Path) -> None:
     workspace = ProjectWorkspace("_test_workspace_external_calibration")
     shutil.rmtree(workspace.project_dir, ignore_errors=True)

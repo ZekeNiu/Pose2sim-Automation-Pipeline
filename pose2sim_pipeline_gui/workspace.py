@@ -7,10 +7,11 @@ from pathlib import Path
 
 from .config_adapter import ConfigApplyResult, config_text, load_config, merged_config
 from .config_builder import build_config_dict, write_config
+from .environment import pose2sim_intrinsics_video_extraction_bug_present
 from .models import PipelineSettings
 from .paths import PROJECTS_DIR, assert_under_workspace, ensure_workspace, output_dir, project_dir, sanitize_project_name
 from .project_state import ProjectStatus, inspect_project
-from .video import VideoInfo, inspect_video, normalize_video
+from .video import VideoInfo, extract_calibration_video_frames, inspect_video, normalize_video
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm"}
@@ -114,11 +115,42 @@ class ProjectWorkspace:
         if not folder.exists():
             return "mp4"
         files = sorted(path for path in folder.rglob("*") if path.is_file())
+        if kind == "intrinsics":
+            for path in files:
+                suffix = path.suffix.lower()
+                if suffix in IMAGE_EXTENSIONS:
+                    return suffix.lstrip(".")
         for path in files:
             suffix = path.suffix.lower().lstrip(".")
             if suffix:
                 return suffix
         return "mp4"
+
+    def prepare_intrinsics_image_frames(self, overwrite: bool = False) -> dict[str, int]:
+        if not pose2sim_intrinsics_video_extraction_bug_present():
+            return {}
+
+        base_dir = self.project_dir / "calibration" / "intrinsics"
+        if not base_dir.exists():
+            return {}
+
+        prepared: dict[str, int] = {}
+        for cam_dir in sorted(path for path in base_dir.iterdir() if path.is_dir()):
+            if not overwrite and any(path.suffix.lower() in IMAGE_EXTENSIONS for path in cam_dir.iterdir() if path.is_file()):
+                continue
+            generated_count = 0
+            video_files = sorted(path for path in cam_dir.iterdir() if path.suffix.lower() in VIDEO_EXTENSIONS)
+            for video_file in video_files:
+                frames = extract_calibration_video_frames(
+                    video_file,
+                    cam_dir,
+                    extract_every_N_sec=1,
+                    overwrite=overwrite,
+                )
+                generated_count += len(frames)
+            if generated_count:
+                prepared[cam_dir.name] = generated_count
+        return prepared
 
     def import_trial_videos(self, files: list[Path]) -> list[VideoInfo]:
         self.create()
@@ -150,6 +182,8 @@ class ProjectWorkspace:
             else:
                 output = cam_dir / f"{cam}_intrinsics.mp4"
                 normalize_video(source, output)
+                if pose2sim_intrinsics_video_extraction_bug_present():
+                    extract_calibration_video_frames(output, cam_dir, extract_every_N_sec=1, overwrite=True)
             outputs.append(output)
         return outputs
 

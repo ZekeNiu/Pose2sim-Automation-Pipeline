@@ -50,6 +50,13 @@ def _sync_times(value: Any) -> list[float]:
     return []
 
 
+def _trimmed_extrema_percent(value: Any) -> float:
+    if value in {None, ""}:
+        return 50.0
+    numeric = float(value)
+    return numeric * 100 if 0 < numeric <= 1 else numeric
+
+
 def _speed_preset_from_pose(mode: Any) -> str:
     if mode == "lightweight":
         return "fast"
@@ -117,8 +124,8 @@ def settings_from_config(project_name: str, config: dict[str, Any]) -> PipelineS
         feet_on_floor=bool(marker_augmentation.get("feet_on_floor", False)),
         right_left_symmetry=bool(kinematics.get("right_left_symmetry", True)),
         filter_cutoff_hz=float(butterworth.get("cut_off_frequency", 6.0)),
-        large_hip_knee_angles=float(kinematics.get("large_hip_knee_angles", 135.0)),
-        trimmed_extrema_percent=float(kinematics.get("trimmed_extrema_percent", 0.5)),
+        large_hip_knee_angles=float(kinematics.get("large_hip_knee_angles", 90.0)),
+        trimmed_extrema_percent=_trimmed_extrema_percent(kinematics.get("trimmed_extrema_percent", 50.0)),
     )
 
 
@@ -169,6 +176,12 @@ GUI_MANAGED_PATHS = [
     ("kinematics", "trimmed_extrema_percent"),
 ]
 
+DEFAULT_COMPATIBILITY_PATHS = [
+    ("filtering", "filter_ik"),
+    ("kinematics", "filter_ik"),
+    ("kinematics", "ik_filter_type"),
+]
+
 CALIBRATION_PATHS = [
     ("calibration", "calibration_type"),
     ("calibration", "calculate", "intrinsics", "intrinsics_extension"),
@@ -197,6 +210,8 @@ def merged_config(project_dir: Path, existing_config: dict[str, Any], settings: 
     merged = copy.deepcopy(existing_config)
     for path in GUI_MANAGED_PATHS:
         _set_nested(merged, generated, path)
+    for path in DEFAULT_COMPATIBILITY_PATHS:
+        _set_nested_if_missing(merged, generated, path)
     if settings.calibration_mode == "convert":
         for path in CONVERT_CALIBRATION_PATHS:
             _set_nested(merged, generated, path)

@@ -7,6 +7,7 @@ from typing import Any
 
 import toml
 
+from .environment import pose2sim_uses_percent_trimmed_extrema
 from .models import PipelineSettings
 
 
@@ -102,6 +103,13 @@ def _pose_speed_values(settings: PipelineSettings) -> tuple[str, int]:
     if settings.speed_preset == "accurate":
         return "performance", 2
     return settings.pose_mode, 4
+
+
+def trimmed_extrema_config_value(value: float) -> float:
+    numeric = float(value)
+    if pose2sim_uses_percent_trimmed_extrema():
+        return numeric * 100 if 0 < numeric <= 1 else numeric
+    return numeric / 100 if numeric > 1 else numeric
 
 
 def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str, Any]:
@@ -238,13 +246,15 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
         "kinematics": {
             "use_augmentation": bool(settings.marker_augmentation),
             "use_simple_model": bool(settings.use_simple_model),
+            "filter_ik": False,
+            "ik_filter_type": "acc_minimizing",
             "parallel_workers_kinematics": "auto",
             "right_left_symmetry": bool(settings.right_left_symmetry),
             "default_height": float(settings.default_height_m),
             "remove_individual_scaling_setup": True,
             "remove_individual_ik_setup": True,
             "large_hip_knee_angles": float(settings.large_hip_knee_angles),
-            "trimmed_extrema_percent": float(settings.trimmed_extrema_percent),
+            "trimmed_extrema_percent": trimmed_extrema_config_value(settings.trimmed_extrema_percent),
         },
         "logging": {
             "use_custom_logging": False,

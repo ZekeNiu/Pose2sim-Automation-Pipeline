@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from collections import deque
 from dataclasses import dataclass
@@ -43,9 +44,12 @@ class PipelineRunner:
         self.python_path = python_path
 
     def _run(self, args: list[str], on_log: LogCallback | None = None) -> RunResult:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
         process = subprocess.Popen(
             [str(self.python_path), "-m", "pose2sim_pipeline_gui.pipeline_cli", *args],
             cwd=str(WORKSPACE_ROOT),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,

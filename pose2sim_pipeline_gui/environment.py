@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,7 +10,9 @@ from .models import EnvironmentStatus
 from .paths import SPORTS3D_PYTHON
 
 
-VERIFIED_POSE2SIM_VERSION = "0.10.43"
+VERIFIED_POSE2SIM_VERSION = "0.10.47"
+POSE2SIM_NEW_INSTALL_MIN_VERSION = "0.10.44"
+POSE2SIM_NEW_INSTALL_MIN_PYTHON = (3, 11, 0)
 
 CHECK_SCRIPT = r"""
 import importlib.metadata as md
@@ -24,6 +27,8 @@ def version(name):
 
 data = {
     "python": sys.executable,
+    "python_version": sys.version.split()[0],
+    "python_version_info": list(sys.version_info[:3]),
     "pose2sim": version("pose2sim"),
     "opensim": None,
     "customtkinter": version("customtkinter"),
@@ -47,6 +52,78 @@ except Exception:
     pass
 print(json.dumps(data, ensure_ascii=False))
 """
+
+
+def version_tuple(version: str | None) -> tuple[int, ...]:
+    if not version:
+        return ()
+    numbers: list[int] = []
+    for part in version.replace("-", ".").split("."):
+        if not part.isdigit():
+            digits = "".join(ch for ch in part if ch.isdigit())
+            if not digits:
+                break
+            part = digits
+        numbers.append(int(part))
+    return tuple(numbers)
+
+
+def version_at_least(version: str | None, minimum: str) -> bool:
+    current = version_tuple(version)
+    required = version_tuple(minimum)
+    if not current:
+        return False
+    width = max(len(current), len(required))
+    return current + (0,) * (width - len(current)) >= required + (0,) * (width - len(required))
+
+
+def python_version_at_least(
+    python_version_info: tuple[int, int, int] | list[int] | None,
+    minimum: tuple[int, int, int] = POSE2SIM_NEW_INSTALL_MIN_PYTHON,
+) -> bool:
+    if python_version_info is None:
+        return False
+    current = tuple(int(part) for part in python_version_info[:3])
+    return current >= minimum
+
+
+def installed_pose2sim_version() -> str | None:
+    try:
+        import importlib.metadata as md
+
+        return md.version("pose2sim")
+    except Exception:
+        return None
+
+
+def pose2sim_uses_percent_trimmed_extrema(version: str | None = None) -> bool:
+    return version_at_least(version or installed_pose2sim_version(), POSE2SIM_NEW_INSTALL_MIN_VERSION)
+
+
+def pose2sim_supports_lower_body(version: str | None = None) -> bool:
+    return version_at_least(version or installed_pose2sim_version(), POSE2SIM_NEW_INSTALL_MIN_VERSION)
+
+
+def pose2sim_intrinsics_video_extraction_bug_present() -> bool:
+    try:
+        from Pose2Sim import calibration
+    except Exception:
+        return False
+
+    try:
+        source = inspect.getsource(calibration.extract_frames)
+    except Exception:
+        version = installed_pose2sim_version()
+        return version_at_least(version, "0.10.47") and not version_at_least(version, "0.10.48")
+
+    return "Path(video_path).exists().stem" in source.replace(" ", "")
+
+
+def _python_info_from_data(data: dict) -> tuple[int, int, int] | None:
+    raw = data.get("python_version_info")
+    if isinstance(raw, list) and len(raw) >= 3:
+        return int(raw[0]), int(raw[1]), int(raw[2])
+    return None
 
 
 def check_environment(python_path: Path = SPORTS3D_PYTHON) -> EnvironmentStatus:
@@ -104,6 +181,13 @@ def check_environment(python_path: Path = SPORTS3D_PYTHON) -> EnvironmentStatus:
         warnings.append("缺少 ffprobe，视频分辨率、帧率和旋转信息预览可能不完整。")
 
     pose2sim_version = data.get("pose2sim")
+    python_version_info = _python_info_from_data(data)
+    if python_version_info and not python_version_at_least(python_version_info):
+        version_label = ".".join(str(part) for part in python_version_info)
+        warnings.append(
+            f"当前 Python 为 {version_label}；Pose2Sim {POSE2SIM_NEW_INSTALL_MIN_VERSION}+ 需要 Python >= 3.11，"
+            "此环境的一键更新通常只能停在 0.10.43。若要使用 0.10.47，请切换到 Python 3.11 或更新环境。"
+        )
     if pose2sim_version and pose2sim_version != VERIFIED_POSE2SIM_VERSION:
         warnings.append(
             f"当前 Pose2Sim 为 {pose2sim_version}；本 GUI 主要按 {VERIFIED_POSE2SIM_VERSION} 验证，"
@@ -125,6 +209,27 @@ def check_environment(python_path: Path = SPORTS3D_PYTHON) -> EnvironmentStatus:
         toml_version=data.get("toml"),
         ffprobe_path=ffprobe_path,
         warnings=warnings,
+        python_version=data.get("python_version"),
+        python_version_info=python_version_info,
+    )
+
+
+def summarize_pose2sim_update(status: EnvironmentStatus, return_code: int) -> tuple[str, bool]:
+    if return_code != 0:
+        return f"更新命令退出码为 {return_code}，请查看环境页日志。", True
+    if version_at_least(status.pose2sim_version, VERIFIED_POSE2SIM_VERSION):
+        return f"Pose2Sim 已是 {status.pose2sim_version}，环境检查已刷新。", False
+    if not python_version_at_least(status.python_version_info):
+        return (
+            "更新命令已结束，但当前 Python 不支持 Pose2Sim 0.10.44+。"
+            f"当前检测到 Pose2Sim {status.pose2sim_version or '未安装'}；"
+            "请切换到 Python 3.11 或更新环境后再安装 0.10.47。",
+            True,
+        )
+    return (
+        f"更新命令已结束，但当前 Pose2Sim 仍为 {status.pose2sim_version or '未安装'}，"
+        "未达到 GUI 验证版本 0.10.47。请查看环境页日志确认 pip 源或网络情况。",
+        True,
     )
 
 

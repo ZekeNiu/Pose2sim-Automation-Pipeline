@@ -19,7 +19,7 @@ from .config_builder import (
     EXTERNAL_CALIBRATION_FORMAT_LABELS,
     EXTERNAL_CALIBRATION_FORMAT_OPTIONS,
 )
-from .environment import check_environment, update_pose2sim
+from .environment import check_environment, pose2sim_supports_lower_body, summarize_pose2sim_update, update_pose2sim
 from .models import PipelineSettings
 from .paths import OUTPUTS_DIR, SPORTS3D_PYTHON, ensure_workspace
 from .project_state import ProjectStatus
@@ -42,6 +42,7 @@ CALIBRATION_MODE_LABELS = {value: label for label, value in CALIBRATION_MODE_OPT
 
 POSE_MODEL_OPTIONS = {
     "身体+足部（推荐）": "Body_with_feet",
+    "下肢模式（Pose2Sim 0.10.44+）": "Lower_body",
     "全身+手腕（更慢，适合上肢细节）": "Whole_body_wrist",
     "全身（更慢，信息最多）": "Whole_body",
     "身体17点（最快，足部信息少）": "Body",
@@ -860,7 +861,10 @@ class Pose2SimChineseApp(ctk.CTk):
         return CALIBRATION_MODE_OPTIONS.get(self.calibration_mode.get(), self.calibration_mode.get())
 
     def _pose_model_value(self) -> str:
-        return POSE_MODEL_OPTIONS.get(self.pose_model_box.get(), self.pose_model_box.get())
+        pose_model = POSE_MODEL_OPTIONS.get(self.pose_model_box.get(), self.pose_model_box.get())
+        if pose_model == "Lower_body" and not pose2sim_supports_lower_body():
+            raise ValueError("下肢模式需要 Pose2Sim 0.10.44 或更高版本。当前环境请先升级到 Python 3.11+ 并安装 Pose2Sim 0.10.47。")
+        return pose_model
 
     def _speed_preset_value(self) -> str:
         return SPEED_PRESET_OPTIONS.get(self.speed_box.get(), self.speed_box.get())
@@ -1323,9 +1327,9 @@ class Pose2SimChineseApp(ctk.CTk):
     def update_pose2sim(self) -> None:
         proceed = messagebox.askyesno(
             "确认更新 Pose2Sim",
-            "当前 GUI 主要按 Pose2Sim 0.10.43 验证。GitHub Releases 当前已到 v0.10.47，"
-            "最新版可能改变安装方式、模型下载地址或 Config 字段。\n\n"
-            "继续后会运行 pip install --upgrade pose2sim，并在结束后重新检查环境。是否继续？",
+            "当前 GUI 主要按 Pose2Sim 0.10.47 验证。Pose2Sim 0.10.44+ 需要 Python 3.11 或更高版本；"
+            "如果当前环境仍是 Python 3.10，pip 通常只能安装到 0.10.43。\n\n"
+            "继续后会运行 pip install --upgrade pose2sim，并在结束后重新检查实际版本。是否继续？",
         )
         if not proceed:
             self._append(self.environment_text, "已取消 Pose2Sim 更新。")
@@ -1355,13 +1359,8 @@ class Pose2SimChineseApp(ctk.CTk):
                 status = check_environment()
                 for line in status.to_chinese_lines():
                     self._queue_log("environment", line)
-                if code == 0:
-                    self.after(
-                        0,
-                        lambda: finish("更新命令已结束，环境检查已刷新。若版本未变化，通常表示当前已经是可安装的最新版本。"),
-                    )
-                else:
-                    self.after(0, lambda: finish(f"更新命令退出码为 {code}，请查看环境页日志。", True))
+                message, is_error = summarize_pose2sim_update(status, code)
+                self.after(0, lambda: finish(message, is_error))
             except Exception as exc:
                 message = str(exc)
                 self._queue_log("environment", f"更新失败: {message}")
@@ -1586,9 +1585,18 @@ class Pose2SimChineseApp(ctk.CTk):
     def make_extrinsics_checkerboard(self) -> None:
         self._make_checkerboard(square_entry=self.extrinsics_square_entry, page_size="A3", purpose="extrinsics")
 
+    def _prepare_intrinsics_frames_for_pose2sim(self, workspace: ProjectWorkspace) -> None:
+        prepared = workspace.prepare_intrinsics_image_frames(overwrite=False)
+        if not prepared:
+            return
+        total = sum(prepared.values())
+        cameras = "，".join(f"{camera}: {count} 张" for camera, count in prepared.items())
+        self._append(self.run_text, f"已为当前 Pose2Sim 版本生成内参 PNG {total} 张（{cameras}）。")
+
     def save_config(self) -> None:
         try:
             workspace = self._current_workspace()
+            self._prepare_intrinsics_frames_for_pose2sim(workspace)
             config = self._write_config_with_prompt(workspace, self._settings())
             if config is not None:
                 self._append(self.run_text, f"已保存配置：{config}")
@@ -1614,6 +1622,7 @@ class Pose2SimChineseApp(ctk.CTk):
     def run_pipeline(self) -> None:
         try:
             workspace = self._current_workspace()
+            self._prepare_intrinsics_frames_for_pose2sim(workspace)
             settings = self._settings()
             status_before = workspace.status()
             config_preview = workspace.preview_settings_to_config(settings)
@@ -1685,6 +1694,7 @@ class Pose2SimChineseApp(ctk.CTk):
             if not (workspace.project_dir / "Config.toml").exists():
                 messagebox.showwarning("缺少配置", "当前项目没有 Config.toml。请先保存 GUI 配置，或打开已有 Pose2Sim 项目。")
                 return
+            self._prepare_intrinsics_frames_for_pose2sim(workspace)
             skip_synchronization = self.skip_sync_var.get()
             self._refresh_project_status()
         except Exception as exc:
@@ -1704,6 +1714,7 @@ class Pose2SimChineseApp(ctk.CTk):
             if not (workspace.project_dir / "Config.toml").exists():
                 messagebox.showwarning("缺少配置", "当前项目没有 Config.toml。请先保存配置，才能从缺失阶段继续。")
                 return
+            self._prepare_intrinsics_frames_for_pose2sim(workspace)
             status = workspace.status()
             skip_synchronization = self.skip_sync_var.get()
             steps = status.missing_steps
