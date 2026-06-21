@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import os
 from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
@@ -9,7 +10,8 @@ OUTPUTS_DIR = WORKSPACE_ROOT / "outputs"
 ASSETS_DIR = WORKSPACE_ROOT / "assets"
 CHECKERBOARD_DIR = ASSETS_DIR / "checkerboards"
 GENERATED_CHECKERBOARD_DIR = CHECKERBOARD_DIR / "generated"
-SPORTS3D_PYTHON = Path(r"D:\Application\Anaconda\envs\sports3d\python.exe")
+DEFAULT_SPORTS3D_PYTHON = Path(r"D:\Application\Anaconda\envs\sports3d\python.exe")
+SPORTS3D_PYTHON = Path(os.environ.get("POSE2SIM_GUI_PYTHON", str(DEFAULT_SPORTS3D_PYTHON)))
 
 WINDOWS_INVALID_CHARS = r'<>:"/\|?*'
 
@@ -47,4 +49,3 @@ def project_dir(project_name: str) -> Path:
 
 def output_dir(project_name: str) -> Path:
     return assert_under_workspace(OUTPUTS_DIR / sanitize_project_name(project_name))
-

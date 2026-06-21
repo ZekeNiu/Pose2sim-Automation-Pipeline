@@ -63,6 +63,7 @@ def settings_from_config(project_name: str, config: dict[str, Any]) -> PipelineS
     pose = config.get("pose", {})
     synchronization = config.get("synchronization", {})
     calibration = config.get("calibration", {})
+    convert = calibration.get("convert", {})
     calculate = calibration.get("calculate", {})
     intrinsics = calculate.get("intrinsics", {})
     extrinsics = calculate.get("extrinsics", {})
@@ -101,9 +102,15 @@ def settings_from_config(project_name: str, config: dict[str, Any]) -> PipelineS
         extrinsics_square_size_mm=float(extrinsics.get("board", {}).get("extrinsics_square_size", 45.0)),
         extrinsics_extension=str(extrinsics.get("extrinsics_extension", "mp4")),
         extrinsics_board_position=str(extrinsics.get("board", {}).get("board_position", "horizontal")),
+        external_calibration_format=str(convert.get("convert_from", "qualisys")),
         skip_synchronization=False,
         sync_times_seconds=_sync_times(synchronization.get("approx_time_maxspeed")),
         sync_search_range_seconds=float(synchronization.get("time_range_around_maxspeed", 2.0)),
+        tracking_mode=str(pose.get("tracking_mode", "sports2d")),
+        tracked_keypoint=str(
+            config.get("personAssociation", {}).get("single_person", {}).get("tracked_keypoint", "Neck")
+        ),
+        manual_sync_selection=bool(synchronization.get("synchronization_gui", False)),
         marker_augmentation=bool(kinematics.get("use_augmentation", True)),
         use_simple_model=bool(kinematics.get("use_simple_model", False)),
         save_overlay_video=pose.get("save_video", "to_video") != "none",
@@ -126,6 +133,17 @@ def _set_nested(target: dict[str, Any], source: dict[str, Any], path: tuple[str,
         target_cursor[key] = source_cursor[key]
 
 
+def _set_nested_if_missing(target: dict[str, Any], source: dict[str, Any], path: tuple[str, ...]) -> None:
+    target_cursor: dict[str, Any] = target
+    source_cursor: dict[str, Any] = source
+    for key in path[:-1]:
+        target_cursor = target_cursor.setdefault(key, {})
+        source_cursor = source_cursor.get(key, {})
+    key = path[-1]
+    if key in source_cursor and key not in target_cursor:
+        target_cursor[key] = source_cursor[key]
+
+
 GUI_MANAGED_PATHS = [
     ("project", "project_dir"),
     ("project", "multi_person"),
@@ -136,8 +154,11 @@ GUI_MANAGED_PATHS = [
     ("pose", "mode"),
     ("pose", "det_frequency"),
     ("pose", "save_video"),
+    ("pose", "tracking_mode"),
+    ("synchronization", "synchronization_gui"),
     ("synchronization", "approx_time_maxspeed"),
     ("synchronization", "time_range_around_maxspeed"),
+    ("personAssociation", "single_person", "tracked_keypoint"),
     ("filtering", "butterworth", "cut_off_frequency"),
     ("markerAugmentation", "feet_on_floor"),
     ("kinematics", "use_augmentation"),
@@ -161,14 +182,27 @@ CALIBRATION_PATHS = [
     ("calibration", "calculate", "extrinsics", "scene", "object_coords_3d"),
 ]
 
+CONVERT_CALIBRATION_PATHS = [
+    ("calibration", "calibration_type"),
+    ("calibration", "convert", "convert_from"),
+]
+
+CONVERT_CALIBRATION_DEFAULT_PATHS = [
+    ("calibration", "convert", "qualisys", "binning_factor"),
+]
+
 
 def merged_config(project_dir: Path, existing_config: dict[str, Any], settings: PipelineSettings) -> dict[str, Any]:
     generated = build_config_dict(project_dir, settings)
     merged = copy.deepcopy(existing_config)
     for path in GUI_MANAGED_PATHS:
         _set_nested(merged, generated, path)
-    existing_calibration_type = existing_config.get("calibration", {}).get("calibration_type")
-    if settings.calibration_mode != "convert" or existing_calibration_type != "convert":
+    if settings.calibration_mode == "convert":
+        for path in CONVERT_CALIBRATION_PATHS:
+            _set_nested(merged, generated, path)
+        for path in CONVERT_CALIBRATION_DEFAULT_PATHS:
+            _set_nested_if_missing(merged, generated, path)
+    else:
         for path in CALIBRATION_PATHS:
             _set_nested(merged, generated, path)
     return merged

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-import toml
-
 from .config_adapter import ConfigApplyResult, config_text, load_config, merged_config
-from .config_builder import write_config
+from .config_builder import build_config_dict, write_config
 from .models import PipelineSettings
 from .paths import PROJECTS_DIR, assert_under_workspace, ensure_workspace, output_dir, project_dir, sanitize_project_name
 from .project_state import ProjectStatus, inspect_project
@@ -16,6 +15,17 @@ from .video import VideoInfo, inspect_video, normalize_video
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+ANALYSIS_RESULT_DIRS = ["pose", "pose-sync", "pose-associated", "pose-3d", "kinematics"]
+ANALYSIS_RESULT_FILES = ["logs.txt", "opensim.log"]
+
+
+@dataclass(frozen=True)
+class ConfigPreviewResult:
+    path: Path
+    changed: bool
+    existing_text: str
+    merged_text: str
+    backup_required: bool = False
 
 
 class ProjectWorkspace:
@@ -64,18 +74,38 @@ class ProjectWorkspace:
     def apply_settings_to_config(self, settings: PipelineSettings) -> ConfigApplyResult:
         self.create()
         config_path = self.project_dir / "Config.toml"
-        if not config_path.exists():
-            return ConfigApplyResult(path=write_config(self.project_dir, settings), changed=True)
-
-        existing = load_config(config_path)
-        merged = merged_config(self.project_dir, existing, settings)
-        if config_text(existing) == config_text(merged):
+        preview = self.preview_settings_to_config(settings)
+        if not preview.changed:
             return ConfigApplyResult(path=config_path, changed=False)
 
-        backup_path = self.backup_config()
+        backup_path = self.backup_config() if config_path.exists() else None
         with config_path.open("w", encoding="utf-8") as handle:
-            toml.dump(merged, handle)
+            handle.write(preview.merged_text)
         return ConfigApplyResult(path=config_path, changed=True, backup_path=backup_path)
+
+    def preview_settings_to_config(self, settings: PipelineSettings) -> ConfigPreviewResult:
+        config_path = self.project_dir / "Config.toml"
+        generated = build_config_dict(self.project_dir, settings)
+        if not config_path.exists():
+            return ConfigPreviewResult(
+                path=config_path,
+                changed=True,
+                existing_text="",
+                merged_text=config_text(generated),
+                backup_required=False,
+            )
+
+        existing = load_config(config_path)
+        existing_text = config_text(existing)
+        merged = merged_config(self.project_dir, existing, settings)
+        merged_text = config_text(merged)
+        return ConfigPreviewResult(
+            path=config_path,
+            changed=existing_text != merged_text,
+            existing_text=existing_text,
+            merged_text=merged_text,
+            backup_required=True,
+        )
 
     def calibration_extension(self, kind: str) -> str:
         if kind not in {"intrinsics", "extrinsics"}:
@@ -139,6 +169,35 @@ class ProjectWorkspace:
                 normalize_video(source, output)
             outputs.append(output)
         return outputs
+
+    def import_external_calibration(self, files: list[Path]) -> list[Path]:
+        self.create()
+        outputs: list[Path] = []
+        calibration_dir = self.project_dir / "calibration"
+        calibration_dir.mkdir(parents=True, exist_ok=True)
+        for file_path in files:
+            target = calibration_dir / file_path.name
+            shutil.copy2(file_path, target)
+            outputs.append(target)
+        return outputs
+
+    def clear_analysis_results(self) -> list[Path]:
+        removed: list[Path] = []
+        for dirname in ANALYSIS_RESULT_DIRS:
+            target = assert_under_workspace(self.project_dir / dirname)
+            if target.exists():
+                shutil.rmtree(target)
+                removed.append(target)
+        for filename in ANALYSIS_RESULT_FILES:
+            target = assert_under_workspace(self.project_dir / filename)
+            if target.exists():
+                target.unlink()
+                removed.append(target)
+        if self.output_dir.exists():
+            target = assert_under_workspace(self.output_dir)
+            shutil.rmtree(target)
+            removed.append(target)
+        return removed
 
 
 def list_projects() -> list[str]:

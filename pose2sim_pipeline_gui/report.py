@@ -4,6 +4,7 @@ import html
 import json
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,7 @@ class ReportVideo:
     media_name: str
     label: str
     source_type: str
+    note: str = ""
 
 
 def _read_sto_table(path: Path) -> pd.DataFrame:
@@ -61,13 +63,58 @@ def _score_label(scores: list[int]) -> str:
     return "高"
 
 
+def _score_grade(score: int) -> str:
+    if score <= 1:
+        return "正常"
+    if score == 2:
+        return "谨慎"
+    return "低可信"
+
+
+def _add_quality_check(
+    *,
+    sections: dict[str, list[str]],
+    rows: list[dict[str, str | float]],
+    risk_scores: list[int],
+    category: str,
+    metric: str,
+    current: str,
+    good_range: str,
+    caution_range: str,
+    score: int,
+    explanation: str,
+    suggestion: str,
+) -> None:
+    grade = _score_grade(score)
+    line = (
+        f"{metric}：当前值 {current}；合理区间：{good_range}；谨慎区间：{caution_range}；"
+        f"判定：{grade}。{explanation} 建议：{suggestion}"
+    )
+    sections.setdefault(category, []).append(line)
+    rows.append(
+        {
+            "类别": category,
+            "指标": metric,
+            "当前值": current,
+            "合理区间": good_range,
+            "谨慎区间": caution_range,
+            "等级": grade,
+            "解释": explanation,
+            "建议": suggestion,
+        }
+    )
+    risk_scores.append(score)
+
+
 def _parse_quality_diagnostics(project_dir: Path) -> QualityDiagnostic:
     sections: dict[str, list[str]] = {
         "校准": [],
         "同步": [],
+        "人物匹配": [],
         "三维重建": [],
         "逆运动学": [],
         "缺失/插值": [],
+        "OpenSim 查看": [],
         "解释建议": [],
     }
     rows: list[dict[str, str | float]] = []
@@ -75,17 +122,72 @@ def _parse_quality_diagnostics(project_dir: Path) -> QualityDiagnostic:
     log_path = project_dir / "logs.txt"
     if log_path.exists():
         text = log_path.read_text(encoding="utf-8", errors="replace")
-        residual_matches = re.findall(r"Residual \(RMS\) calibration errors.*", text, flags=re.IGNORECASE)
+        intrinsics_matches = [float(value) for value in re.findall(r"Intrinsics error:\s*([0-9.]+)\s*px", text)]
+        if intrinsics_matches:
+            max_value = max(intrinsics_matches)
+            score = 1 if max_value <= 0.5 else 2 if max_value <= 1.0 else 3
+            _add_quality_check(
+                sections=sections,
+                rows=rows,
+                risk_scores=risk_scores,
+                category="校准",
+                metric="内参 RMS",
+                current=", ".join(f"{value:.3g} px" for value in intrinsics_matches),
+                good_range="≤0.5 px",
+                caution_range="0.5-1.0 px",
+                score=score,
+                explanation="内参描述镜头畸变和焦距，误差越低越有利于后续三维重建。",
+                suggestion="若超过 1.0 px，重新录制清晰、不同位置和不同角度的棋盘格内参视频。",
+            )
+
+        residual_matches = re.findall(
+            r"Residual \(RMS\) calibration errors.*?\[([^\]]+)\]\s*px.*?corresponds to\s*\[([^\]]+)\]\s*mm",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
         if residual_matches:
-            values = _numbers_from_brackets(residual_matches[-1])
-            if values:
-                max_value = max(values)
-                mean_value = sum(values) / len(values)
-                score = 1 if max_value <= 1 else 2 if max_value <= 3 else 3
-                risk_scores.append(score)
-                msg = f"每台相机校准 RMS 约为 {', '.join(f'{v:.3g}' for v in values)}，平均 {mean_value:.3g}，最大 {max_value:.3g}。"
-                sections["校准"].append(msg + (" 该数值较低，校准质量较好。" if score == 1 else " 该数值偏高时，应检查棋盘格/场景点是否清晰、分布是否充分。"))
-                rows.append({"类别": "校准", "指标": "校准 RMS", "数值": ", ".join(f"{v:.3g}" for v in values), "解释": sections["校准"][-1]})
+            px_values = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", residual_matches[-1][0])]
+            mm_values = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?", residual_matches[-1][1])]
+            if px_values:
+                max_px = max(px_values)
+                max_mm = max(mm_values) if mm_values else float("inf")
+                score = 1 if max_px <= 5 or max_mm <= 15 else 2 if max_px <= 15 or max_mm <= 30 else 3
+                current = ", ".join(f"{value:.3g} px" for value in px_values)
+                if mm_values:
+                    current += "；" + ", ".join(f"{value:.3g} mm" for value in mm_values)
+                _add_quality_check(
+                    sections=sections,
+                    rows=rows,
+                    risk_scores=risk_scores,
+                    category="校准",
+                    metric="外参/校准 RMS",
+                    current=current,
+                    good_range="≤5 px 或 ≤15 mm",
+                    caution_range="5-15 px 或 15-30 mm",
+                    score=score,
+                    explanation="外参决定每台相机在三维空间中的位置和朝向。",
+                    suggestion="点集中在小棋盘格或画面边缘时，优先改用分布更大的场景点，或使用更大棋盘格并让其覆盖更多运动空间。",
+                )
+        else:
+            residual_line_matches = re.findall(r"Residual \(RMS\) calibration errors.*", text, flags=re.IGNORECASE)
+            if residual_line_matches:
+                values = _numbers_from_brackets(residual_line_matches[-1])
+                if values:
+                    max_value = max(values)
+                    score = 1 if max_value <= 5 else 2 if max_value <= 15 else 3
+                    _add_quality_check(
+                        sections=sections,
+                        rows=rows,
+                        risk_scores=risk_scores,
+                        category="校准",
+                        metric="外参/校准 RMS",
+                        current=", ".join(f"{value:.3g} px" for value in values),
+                        good_range="≤5 px 或 ≤15 mm",
+                        caution_range="5-15 px 或 15-30 mm",
+                        score=score,
+                        explanation="外参决定每台相机在三维空间中的位置和朝向。",
+                        suggestion="检查棋盘格/场景点是否清晰、分布是否充分，必要时重做外参。",
+                    )
 
         sync_matches = re.findall(r"Camera .*? correlation [0-9.]+", text, flags=re.IGNORECASE)
         if sync_matches:
@@ -101,31 +203,85 @@ def _parse_quality_diagnostics(project_dir: Path) -> QualityDiagnostic:
             if correlations:
                 min_corr = min(correlations)
                 score = 1 if min_corr >= 0.8 else 2 if min_corr >= 0.5 else 3
-                risk_scores.append(score)
                 msg = f"同步相关系数范围 {min(correlations):.2f}-{max(correlations):.2f}，帧偏移约为 {', '.join(offsets) if offsets else '未解析'} 帧。"
-                sections["同步"].append(msg + (" 同步可信度较高。" if score == 1 else " 相关性一般时，小幅相位差可能影响快速动作峰值。"))
-                rows.append({"类别": "同步", "指标": "相关系数/帧偏移", "数值": msg, "解释": sections["同步"][-1]})
+                _add_quality_check(
+                    sections=sections,
+                    rows=rows,
+                    risk_scores=risk_scores,
+                    category="同步",
+                    metric="相关系数/帧偏移",
+                    current=msg,
+                    good_range="相关系数 ≥0.8",
+                    caution_range="相关系数 0.5-0.8",
+                    score=score,
+                    explanation="相关系数越高，说明不同机位识别到的同步动作越一致。",
+                    suggestion="相关系数偏低时，录制更明显的同步动作，或开启官方手动选人/同步窗口确认人员和关键点。",
+                )
+
+        association_matches = re.findall(
+            r"Mean reprojection error for (.*?) point on all frames is ([0-9.]+) px.*?corresponds to ([0-9.]+) mm",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if association_matches:
+            keypoint, px_text, mm_text = association_matches[-1]
+            px = float(px_text)
+            mm = float(mm_text)
+            score = 1 if px <= 20 else 2 if px <= 35 else 3
+            _add_quality_check(
+                sections=sections,
+                rows=rows,
+                risk_scores=risk_scores,
+                category="人物匹配",
+                metric=f"{keypoint} 单人关联误差",
+                current=f"{px:.2f} px / {mm:.1f} mm",
+                good_range="≤20 px",
+                caution_range="20-35 px",
+                score=score,
+                explanation="单人模式仍需要确认每个机位跟踪的是同一个人，同一关键点重投影误差越低越可靠。",
+                suggestion="误差偏高时，换更稳定的跟踪参考点，减少遮挡，或开启官方手动选人/同步窗口。",
+            )
 
         reprojection_summary = re.findall(
-            r"Mean reprojection error for all points.*? is ([0-9.]+) px.*?(?:corresponds to|~) ([0-9.]+) m",
+            r"Mean reprojection error for all points.*? is ([0-9.]+) px.*?(?:corresponds to|~) ([0-9.]+) (mm|m)",
             text,
             flags=re.IGNORECASE,
         )
         if reprojection_summary:
-            px, meters = [float(value) for value in reprojection_summary[-1]]
+            px_text, distance_text, distance_unit = reprojection_summary[-1]
+            px = float(px_text)
+            distance = float(distance_text)
             score = 1 if px <= 8 else 2 if px <= 15 else 3
-            risk_scores.append(score)
-            msg = f"所有点平均重投影误差约 {px:.2f} px，粗略对应 {meters:.3f} m。"
-            sections["三维重建"].append(msg + (" 三维重建误差处于可用范围。" if score <= 2 else " 误差偏高，建议优先检查相机标定、遮挡和关键点识别。"))
-            rows.append({"类别": "三维重建", "指标": "平均重投影误差", "数值": f"{px:.2f} px / {meters:.3f} m", "解释": sections["三维重建"][-1]})
+            _add_quality_check(
+                sections=sections,
+                rows=rows,
+                risk_scores=risk_scores,
+                category="三维重建",
+                metric="平均重投影误差",
+                current=f"{px:.2f} px / {distance:.3g} {distance_unit}",
+                good_range="≤8 px",
+                caution_range="8-15 px",
+                score=score,
+                explanation="三维重建误差反映 2D 关键点、相机标定和多视角几何是否一致。",
+                suggestion="误差偏高时，优先检查外参、相机顺序、遮挡和关键点识别质量。",
+            )
         excluded_matches = re.findall(r"In average, ([0-9.]+) cameras had to be excluded", text, flags=re.IGNORECASE)
         if excluded_matches:
             excluded = float(excluded_matches[-1])
             score = 1 if excluded <= 0.2 else 2 if excluded <= 0.8 else 3
-            risk_scores.append(score)
-            msg = f"为满足误差阈值，平均每帧约排除 {excluded:.2f} 台相机。"
-            sections["三维重建"].append(msg + (" 说明多机位一致性较好。" if score == 1 else " 排除相机较多时，部分关节可能依赖较少视角。"))
-            rows.append({"类别": "三维重建", "指标": "排除相机比例", "数值": f"{excluded:.2f}", "解释": sections["三维重建"][-1]})
+            _add_quality_check(
+                sections=sections,
+                rows=rows,
+                risk_scores=risk_scores,
+                category="三维重建",
+                metric="平均排除相机数",
+                current=f"{excluded:.2f} 台/帧",
+                good_range="≤0.2 台/帧",
+                caution_range="0.2-0.8 台/帧",
+                score=score,
+                explanation="排除相机越多，说明某些机位关键点质量或几何一致性越不稳定。",
+                suggestion="排除偏多时，检查被排除机位的遮挡、曝光、相机顺序和标定。",
+            )
 
     ik_files = sorted((project_dir / "kinematics").glob("*marker_errors*.sto"))
     if not ik_files:
@@ -136,20 +292,38 @@ def _parse_quality_diagnostics(project_dir: Path) -> QualityDiagnostic:
             mean_rms = float(table["marker_error_RMS"].mean())
             max_err = float(table.get("marker_error_max", pd.Series(dtype=float)).max())
             score = 1 if mean_rms <= 0.02 else 2 if mean_rms <= 0.04 else 3
-            risk_scores.append(score)
-            msg = f"IK marker RMS 平均 {mean_rms:.4f} m，最大 marker error {max_err:.4f} m。"
-            sections["逆运动学"].append(msg + (" 模型拟合较稳定。" if score == 1 else " 该误差提示关节角应优先看趋势和较大变化。"))
-            rows.append({"类别": "逆运动学", "指标": "IK marker error", "数值": f"RMS {mean_rms:.4f} m / max {max_err:.4f} m", "解释": sections["逆运动学"][-1]})
+            _add_quality_check(
+                sections=sections,
+                rows=rows,
+                risk_scores=risk_scores,
+                category="逆运动学",
+                metric="IK marker error",
+                current=f"RMS {mean_rms:.4f} m / max {max_err:.4f} m",
+                good_range="RMS ≤0.02 m",
+                caution_range="RMS 0.02-0.04 m",
+                score=score,
+                explanation="IK marker error 表示 OpenSim 模型标记点与三维重建标记点的拟合距离。",
+                suggestion="超过 0.04 m 时，关节角主要看大趋势；优先改善外参、遮挡、跟踪参考点和 OpenSim 缩放输入身高。",
+            )
 
     trc_files = sorted((project_dir / "pose-3d").glob("*.trc"))
     for trc_file in trc_files[:3]:
         text = trc_file.read_text(encoding="utf-8", errors="replace")
         nan_count = text.lower().count("nan")
         if nan_count:
-            risk_scores.append(2)
-            msg = f"{trc_file.name} 中发现 {nan_count} 个 NaN 文本。"
-            sections["缺失/插值"].append(msg + " 如果集中出现在某些时段，相关关节角峰值需要谨慎解释。")
-            rows.append({"类别": "缺失/插值", "指标": "NaN", "数值": str(nan_count), "解释": sections["缺失/插值"][-1]})
+            _add_quality_check(
+                sections=sections,
+                rows=rows,
+                risk_scores=risk_scores,
+                category="缺失/插值",
+                metric="TRC 缺失值",
+                current=f"{nan_count} 个 NaN",
+                good_range="0 个 NaN",
+                caution_range="少量、非关键时段 NaN",
+                score=2,
+                explanation="NaN 表示部分关键点在部分帧没有可用三维坐标。",
+                suggestion="如果 NaN 集中在动作峰值附近，相关关节角峰值需要谨慎解释。",
+            )
 
     confidence = _score_label(risk_scores)
     if confidence == "高":
@@ -161,9 +335,31 @@ def _parse_quality_diagnostics(project_dir: Path) -> QualityDiagnostic:
     else:
         summary = "综合置信度：未知。未解析到足够质量指标，请同时查看 Pose2Sim 原始日志、叠加视频和 OpenSim 输出。"
 
+    sections["OpenSim 查看"].append(
+        "查看 OpenSim 动画时，先打开 kinematics 目录下的 .osim 模型，再在 OpenSim 中加载同名 .mot 文件。"
+        "如果没有骨架外观，请确认 kinematics/Geometry 目录已随输出一起复制。"
+    )
+    sections["OpenSim 查看"].append(
+        "模型失真通常不是 .mot 文件缺失导致，更常见原因是外参覆盖不足、IK marker error 偏高、遮挡、相机视角太少或身高/尺度输入不准。"
+    )
+    sections["解释建议"].append(
+        "叠加检测视频里的 2D 骨架稳定，不等于三维结果和 OpenSim 动作可信；"
+        "若外参 RMS、人物匹配误差或 IK marker error 超出合理区间，应优先重做外参。"
+    )
     sections["解释建议"].append("本报告只解释数据质量和关节活动度趋势，不构成医学诊断或康复处方。")
     if not rows:
-        rows.append({"类别": "诊断", "指标": "未解析", "数值": "未知", "解释": summary})
+        rows.append(
+            {
+                "类别": "诊断",
+                "指标": "未解析",
+                "当前值": "未知",
+                "合理区间": "未知",
+                "谨慎区间": "未知",
+                "等级": "未知",
+                "解释": summary,
+                "建议": "查看 Pose2Sim 原始日志、叠加视频和 OpenSim 输出。",
+            }
+        )
     return QualityDiagnostic(confidence=confidence, summary=summary, sections=sections, table=pd.DataFrame(rows))
 
 
@@ -185,13 +381,110 @@ def _select_report_video_sources(project_dir: Path) -> list[ReportVideo]:
     ]
 
 
+def _is_browser_compatible_video(path: Path) -> bool | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,pix_fmt",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    stream = (data.get("streams") or [{}])[0]
+    return stream.get("codec_name") == "h264" and stream.get("pix_fmt") == "yuv420p"
+
+
+def _transcode_video_for_browser(source: Path, target: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return False
+    temp_target = target.with_name(f"{target.stem}.tmp{target.suffix}")
+    temp_target.unlink(missing_ok=True)
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(temp_target),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0 or not temp_target.exists():
+        temp_target.unlink(missing_ok=True)
+        return False
+    target.unlink(missing_ok=True)
+    temp_target.replace(target)
+    return True
+
+
 def _copy_report_videos(project_dir: Path, media_dir: Path) -> list[ReportVideo]:
     media_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[ReportVideo] = []
     for video in _select_report_video_sources(project_dir):
         target = media_dir / video.media_name
-        shutil.copy2(video.source, target)
-        outputs.append(video)
+        compatible = _is_browser_compatible_video(video.source)
+        source_type = video.source_type
+        note = ""
+        if compatible is False:
+            if _transcode_video_for_browser(video.source, target):
+                source_type = f"{source_type}，已转为浏览器兼容视频"
+            else:
+                shutil.copy2(video.source, target)
+                note = "未能转为 H.264，若浏览器无法播放，请用播放器打开 media 文件。"
+        else:
+            shutil.copy2(video.source, target)
+            if compatible is None:
+                note = "未能确认浏览器兼容性。"
+        outputs.append(
+            ReportVideo(
+                source=target,
+                media_name=target.name,
+                label=video.label,
+                source_type=source_type,
+                note=note,
+            )
+        )
     return outputs
 
 
@@ -361,11 +654,13 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
     full_diag_html = _diagnostic_sections_html(diagnostics.sections)
     hidden_notice = " ".join(hidden_messages)
     selector_html = ""
+    selector_panel_html = ""
     if len(mot_files) > 1:
         selector_html = (
             "<label for='subject-select'>人员/结果：</label>"
             f"<select id='subject-select'>{''.join(selector_options)}</select>"
         )
+        selector_panel_html = f'<section class="panel">{selector_html}</section>'
     video_grid = _video_grid(videos)
     html_path = reports_dir / f"{project_dir.name}_关节活动度.html"
     html_path.write_text(
@@ -374,7 +669,7 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html.escape(project_dir.name)} 关节活动度报告</title>
+  <title>Pose2sim运动学分析报告</title>
   <style>
     body {{ margin: 0; font-family: "Microsoft YaHei", Arial, sans-serif; background: #f6f7f9; color: #1f2933; }}
     header {{ padding: 24px 32px; background: #102033; color: white; }}
@@ -403,8 +698,7 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
 </head>
 <body>
   <header>
-    <h1>{html.escape(project_dir.name)} 关节活动度报告</h1>
-    <div>角度来源：OpenSim 逆运动学 .mot 文件；单位：度。</div>
+    <h1>Pose2sim运动学分析报告</h1>
   </header>
   <main>
     <section class="summary">
@@ -416,7 +710,7 @@ def generate_reports(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:
       <h2>同步视频</h2>
       {video_grid or '<p>未找到可嵌入视频。</p>'}
     </section>
-    <section class="panel">{selector_html or '当前报告包含 1 个可解析 .mot 文件。'}</section>
+    {selector_panel_html}
     {''.join(subject_blocks)}
   </main>
   <dialog id="info-dialog"><h3 id="info-title"></h3><div id="info-body"></div><button class="primary" onclick="this.closest('dialog').close()">关闭</button></dialog>
@@ -474,13 +768,17 @@ def _video_grid(videos: list[ReportVideo]) -> str:
     if not videos:
         return ""
     count_class = f"video-count-{min(len(videos), 4)}"
-    cards = "\n".join(
-        "<div class='video-card'>"
-        f"<h3>{html.escape(video.label)} <span class='notice'>({html.escape(video.source_type)})</span></h3>"
-        f"<video class='sync-video' controls preload='metadata' src='media/{html.escape(video.media_name)}'></video>"
-        "</div>"
-        for video in videos
-    )
+    card_items: list[str] = []
+    for video in videos:
+        note_html = f"<div class='notice'>{html.escape(video.note)}</div>" if video.note else ""
+        card_items.append(
+            "<div class='video-card'>"
+            f"<h3>{html.escape(video.label)}</h3>"
+            f"<video class='sync-video' controls preload='metadata' src='media/{html.escape(video.media_name)}'></video>"
+            f"{note_html}"
+            "</div>"
+        )
+    cards = "\n".join(card_items)
     return f"<div class='video-grid {count_class}'>{cards}</div>"
 
 
@@ -492,6 +790,42 @@ def _diagnostic_sections_html(sections: dict[str, list[str]]) -> str:
         items = "".join(f"<li>{html.escape(line)}</li>" for line in lines)
         blocks.append(f"<section><h4>{html.escape(title)}</h4><ul>{items}</ul></section>")
     return "".join(blocks) or "<p>未发现可解析的完整诊断信息。</p>"
+
+
+def quality_diagnostics_for_project(project_dir: Path) -> QualityDiagnostic:
+    return _parse_quality_diagnostics(project_dir)
+
+
+def diagnostic_issue_lines(diagnostics: QualityDiagnostic, limit: int = 4) -> list[str]:
+    if diagnostics.table.empty:
+        return []
+    rows = []
+    for _, row in diagnostics.table.iterrows():
+        grade = str(row.get("等级", ""))
+        if grade in {"正常", "未知"}:
+            continue
+        rows.append(
+            f"{row.get('类别', '')} - {row.get('指标', '')}: 当前值 {row.get('当前值', '')}；"
+            f"合理区间 {row.get('合理区间', '')}；建议 {row.get('建议', '')}"
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def find_report_outputs(project_dir: Path, output_dir: Path) -> tuple[Path | None, Path | None]:
+    reports_dir = output_dir / "reports"
+    single_html = reports_dir / f"{project_dir.name}_关节活动度.html"
+    single_excel = reports_dir / f"{project_dir.name}_关节活动度.xlsx"
+    if single_html.exists():
+        return single_html, single_excel if single_excel.exists() else None
+    index_html = output_dir / "index.html"
+    if index_html.exists():
+        excel_files = sorted(output_dir.rglob("*.xlsx"))
+        return index_html, excel_files[0] if excel_files else None
+    html_files = sorted(output_dir.rglob("*.html"))
+    excel_files = sorted(output_dir.rglob("*.xlsx"))
+    return (html_files[0] if html_files else None, excel_files[0] if excel_files else None)
 
 
 def generate_reports_for_project(project_dir: Path, output_dir: Path) -> tuple[Path, Path]:

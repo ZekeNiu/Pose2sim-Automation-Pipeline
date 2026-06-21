@@ -3,20 +3,29 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import difflib
 from pathlib import Path
+import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
 from .checkerboard import generate_checkerboard
 from .config_adapter import load_config, settings_from_config
-from .config_builder import DEFAULT_SCENE_POINTS
+from .config_builder import (
+    DEFAULT_SCENE_POINTS,
+    EXTERNAL_CALIBRATION_DESCRIPTIONS,
+    EXTERNAL_CALIBRATION_EXTENSIONS,
+    EXTERNAL_CALIBRATION_FORMAT_LABELS,
+    EXTERNAL_CALIBRATION_FORMAT_OPTIONS,
+)
 from .environment import check_environment, update_pose2sim
 from .models import PipelineSettings
 from .paths import OUTPUTS_DIR, SPORTS3D_PYTHON, ensure_workspace
 from .project_state import ProjectStatus
-from .runner import PipelineRunner
-from .workspace import ProjectWorkspace, list_projects
+from .report import diagnostic_issue_lines, find_report_outputs, quality_diagnostics_for_project
+from .runner import PipelineRunner, RunResult
+from .workspace import ConfigPreviewResult, ProjectWorkspace, list_projects
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -48,6 +57,32 @@ BOARD_POSITION_OPTIONS = {
     "水平放置（地面/地垫）": "horizontal",
     "垂直放置（墙面/支架）": "vertical",
 }
+
+MIN_SCENE_POINTS = 6
+MAX_SCENE_POINTS = 15
+
+TARGET_SELECTION_OPTIONS = {
+    "自动跟踪（推荐，单人清晰场景）": "auto",
+    "官方手动选人/同步（会弹出 Pose2Sim 英文窗口）": "manual_sync",
+}
+TARGET_SELECTION_LABELS = {value: label for label, value in TARGET_SELECTION_OPTIONS.items()}
+
+TRACKED_KEYPOINT_OPTIONS = {
+    "Neck（推荐，躯干稳定时优先）": "Neck",
+    "Hip（下肢动作、躯干遮挡时可试）": "Hip",
+    "RShoulder（右肩更清楚时）": "RShoulder",
+    "LShoulder（左肩更清楚时）": "LShoulder",
+}
+TRACKED_KEYPOINT_LABELS = {value: label for label, value in TRACKED_KEYPOINT_OPTIONS.items()}
+
+
+def parse_float_list(value: str) -> list[float]:
+    normalized = value.replace("，", ",").replace("；", ",").replace(";", ",")
+    parts = [part.strip() for part in normalized.split(",") if part.strip()]
+    try:
+        return [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError("请输入数字，并用逗号或分号分隔，例如 1.2，1.4。") from exc
 
 
 class Pose2SimChineseApp(ctk.CTk):
@@ -265,8 +300,42 @@ class Pose2SimChineseApp(ctk.CTk):
         self.calibration_mode.set(CALIBRATION_MODE_LABELS["scene"])
         self.calibration_mode.pack(side="left", padx=(0, 8))
 
+        self.external_calibration_frame = ctk.CTkFrame(content, fg_color="#f8fafc")
+        self.external_calibration_frame.grid(row=3, column=0, sticky="ew", padx=18, pady=(2, 8))
+        self.external_calibration_frame.grid_columnconfigure(1, weight=1)
+        self._label_with_info(
+            self.external_calibration_frame,
+            "外部校准来源",
+            0,
+            0,
+            "外部校准来源怎么选",
+            "只有选择“使用已有/外部校准”时需要。请选择外部系统格式，GUI 会把格式写入 Config.toml，并把选择的校准文件复制到项目 calibration 目录。\n\n"
+            "常用格式会检查扩展名；高级格式只做复制和提示，仍需符合 Pose2Sim 官方文件结构。",
+        )
+        self.external_calibration_format_box = ctk.CTkComboBox(
+            self.external_calibration_frame,
+            values=list(EXTERNAL_CALIBRATION_FORMAT_OPTIONS.keys()),
+            command=self._on_external_calibration_format_change,
+            width=360,
+        )
+        self.external_calibration_format_box.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(0, 8))
+        self.external_calibration_format_box.set(EXTERNAL_CALIBRATION_FORMAT_LABELS["qualisys"])
+        self.external_calibration_description = ctk.CTkLabel(
+            self.external_calibration_frame,
+            text="",
+            anchor="w",
+            justify="left",
+            wraplength=680,
+        )
+        self.external_calibration_description.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 8))
+        ctk.CTkButton(
+            self.external_calibration_frame,
+            text="导入外部校准文件",
+            command=self.import_external_calibration,
+        ).grid(row=1, column=2, sticky="e", pady=(0, 8))
+
         board_grid = ctk.CTkFrame(content, fg_color="transparent")
-        board_grid.grid(row=3, column=0, sticky="ew", padx=18, pady=8)
+        board_grid.grid(row=4, column=0, sticky="ew", padx=18, pady=8)
         for i in range(4):
             board_grid.grid_columnconfigure(i, weight=1)
         self.intrinsics_square_entry = self._entry(
@@ -313,14 +382,14 @@ class Pose2SimChineseApp(ctk.CTk):
         ).grid(row=1, column=3, sticky="w", pady=(0, 10))
 
         buttons = ctk.CTkFrame(content, fg_color="transparent")
-        buttons.grid(row=4, column=0, sticky="ew", padx=18, pady=8)
+        buttons.grid(row=5, column=0, sticky="ew", padx=18, pady=8)
         ctk.CTkButton(buttons, text="生成内参棋盘格 A4", command=self.make_intrinsics_checkerboard).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="生成外参棋盘格 A3", command=self.make_extrinsics_checkerboard).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="导入内参棋盘格视频", command=self.import_intrinsics).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="导入外参视频/图片", command=self.import_extrinsics).pack(side="left")
 
         guide_text = ctk.CTkTextbox(content, height=230)
-        guide_text.grid(row=5, column=0, sticky="ew", padx=18, pady=12)
+        guide_text.grid(row=6, column=0, sticky="ew", padx=18, pady=12)
         guide_text.insert(
             "end",
             "内参视频怎么录：\n"
@@ -330,18 +399,23 @@ class Pose2SimChineseApp(ctk.CTk):
             "场景点外参怎么做：\n"
             "1. 先定义坐标系，例如运动区域地面中心为 P1=[0,0,0]，前方是 X 正方向，左方是 Y 正方向，上方是 Z 正方向，单位是米。\n"
             "2. 3D 坐标来自现场测量：卷尺、激光测距仪、地砖尺寸、场地标线或已知物体尺寸都可以。它不是视频里的像素坐标。\n"
-            "3. 点上建议放彩色胶带十字、编号贴纸、小锥桶、反光点；如果墙角、箱体角点、跑台边缘足够清楚，也可以不额外放东西。\n"
+            "3. 建议填写 6-15 个点。点上建议放彩色胶带十字、编号贴纸、小锥桶、反光点；如果墙角、箱体角点、跑台边缘足够清楚，也可以不额外放东西。\n"
             "4. 正式摆好所有相机后，不要再移动相机。拍每个机位都能看到这些点的外参资料：清晰图片即可，录 3-5 秒静态视频也可以。\n"
             "5. 外参资料拍完后，只要相机不动，点位标记可以移走，再录正式动作视频。后续在 GUI/校准工具里点选时，点击顺序必须和表格 P1、P2、P3 一致。\n\n"
             "棋盘格外参怎么做：\n"
             "1. 相机固定后，把较大的外参棋盘格放在所有相机都能清楚看到的位置，可水平放在地面，也可垂直固定。\n"
             "2. 建议使用 GUI 生成的 A3/45 mm 外参棋盘格；A4 可用但不推荐全身动作。录制 3-5 秒清晰视频或导入清晰图片。\n"
-            "3. 内参棋盘格和外参棋盘格参数是独立的；如果实际打印尺寸不同，请分别修改上方两个方格边长。\n",
+            "3. 内参棋盘格和外参棋盘格参数是独立的；如果实际打印尺寸不同，请分别修改上方两个方格边长。\n\n"
+            "运行校准时可能出现 Pose2Sim 官方英文图片确认窗口：Y 表示接受当前角点，N 表示跳过当前图，C 表示手动点选。"
+            "手动点选时左键添加点、右键撤销，H 表示点不可见。角点很小、模糊、遮挡或顺序不确定时不要直接按 Y；"
+            "应优先保留角点完整清晰、覆盖画面范围足够大的图片。\n\n"
+            "注意：叠加检测视频里的 2D 骨架稳定，不等于三维结果和 OpenSim 动作可信。"
+            "如果外参 RMS、人物匹配误差或 IK marker error 超出合理区间，应优先重做外参。\n",
         )
         guide_text.configure(state="disabled")
 
         self.scene_points_frame = ctk.CTkFrame(content, fg_color="transparent")
-        self.scene_points_frame.grid(row=6, column=0, sticky="ew", padx=18, pady=(2, 8))
+        self.scene_points_frame.grid(row=7, column=0, sticky="ew", padx=18, pady=(2, 8))
         for col in range(5):
             self.scene_points_frame.grid_columnconfigure(col, weight=1 if col else 0)
         self._label_with_info(
@@ -351,7 +425,8 @@ class Pose2SimChineseApp(ctk.CTk):
             0,
             "场景点怎么填写",
             "这里填写真实世界中的 3D 坐标，不是视频里的像素坐标。\n\n"
-            "示例：地面中心可以设为 P1=[0,0,0]，向前 1 米是 [1,0,0]，向左 0.3 米是 [0,0.3,0]。点越分散、越容易在各机位中准确点击，外参越可靠。",
+            "示例：地面中心可以设为 P1=[0,0,0]，向前 1 米是 [1,0,0]，向左 0.3 米是 [0,0.3,0]。\n\n"
+            "请填写 6-15 个完整点。点越分散、越容易在各机位中准确点击，外参越可靠。",
             columnspan=5,
         )
         headers = ["点编号", "X", "Y", "Z", "现场说明"]
@@ -370,30 +445,31 @@ class Pose2SimChineseApp(ctk.CTk):
             "地面左后角/胶带十字",
             "地面右后角/胶带十字",
         ]
-        for row_index, coords in enumerate(DEFAULT_SCENE_POINTS[:10], start=2):
-            point_entry = ctk.CTkEntry(self.scene_points_frame, width=70)
-            point_entry.insert(0, f"P{row_index - 1}")
-            x_entry = ctk.CTkEntry(self.scene_points_frame)
-            y_entry = ctk.CTkEntry(self.scene_points_frame)
-            z_entry = ctk.CTkEntry(self.scene_points_frame)
-            note_entry = ctk.CTkEntry(self.scene_points_frame)
-            for entry, value, col in [
-                (point_entry, f"P{row_index - 1}", 0),
-                (x_entry, str(coords[0]), 1),
-                (y_entry, str(coords[1]), 2),
-                (z_entry, str(coords[2]), 3),
-                (note_entry, default_notes[row_index - 2], 4),
-            ]:
-                if entry is not point_entry:
-                    entry.insert(0, value)
-                entry.grid(row=row_index, column=col, sticky="ew", padx=(0, 8), pady=2)
-            self.scene_point_entries.append((point_entry, x_entry, y_entry, z_entry, note_entry))
+        for coords, note in zip(DEFAULT_SCENE_POINTS[:10], default_notes):
+            self._add_scene_point_row(coords, note)
+        scene_point_controls = ctk.CTkFrame(self.scene_points_frame, fg_color="transparent")
+        scene_point_controls.grid(row=MAX_SCENE_POINTS + 2, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        self.add_scene_point_button = ctk.CTkButton(
+            scene_point_controls,
+            text="增加场景点",
+            command=self._add_empty_scene_point_row,
+        )
+        self.add_scene_point_button.pack(side="left", padx=(0, 8))
+        self.delete_scene_point_button = ctk.CTkButton(
+            scene_point_controls,
+            text="删除最后一行",
+            fg_color="#64748b",
+            command=self._delete_last_scene_point_row,
+        )
+        self.delete_scene_point_button.pack(side="left")
+        self._update_scene_point_buttons()
 
         self.calibration_text = ctk.CTkTextbox(content, height=100)
-        self.calibration_text.grid(row=7, column=0, sticky="ew", padx=18, pady=(6, 12))
+        self.calibration_text.grid(row=8, column=0, sticky="ew", padx=18, pady=(6, 12))
         self.calibration_text.insert("end", "校准资料导入状态会显示在这里。\n")
-        self._step_nav(content, "校准", 8)
+        self._step_nav(content, "校准", 9)
         self._on_calibration_mode_change()
+        self._on_external_calibration_format_change()
 
     def _build_video_tab(self) -> None:
         tab = self.tabs.tab("视频")
@@ -584,6 +660,40 @@ class Pose2SimChineseApp(ctk.CTk):
             info_title="滤波截止频率",
             info_body="用于平滑三维点轨迹。过低会抹掉快速动作，过高会保留噪声。普通体能动作通常保持 6 Hz。",
         )
+        self._label_with_info(
+            self.advanced_frame,
+            "检测目标与跟踪方式",
+            3,
+            0,
+            "检测目标与跟踪方式",
+            "单人清晰场景建议保持自动跟踪。GUI 会写入 Pose2Sim 的 sports2d 跟踪，并用下方参考点在多机位之间关联同一个人。\n\n"
+            "官方手动选人/同步会启用 Pose2Sim 原生英文窗口，适合自动跟踪错人、遮挡严重或需要人工确认同步的情况。",
+            columnspan=2,
+        )
+        self.target_mode_box = ctk.CTkComboBox(
+            self.advanced_frame,
+            values=list(TARGET_SELECTION_OPTIONS.keys()),
+            width=360,
+        )
+        self.target_mode_box.grid(row=4, column=0, columnspan=2, sticky="ew", padx=(0, 10), pady=(0, 10))
+        self.target_mode_box.set(TARGET_SELECTION_LABELS["auto"])
+        self._label_with_info(
+            self.advanced_frame,
+            "跟踪参考点",
+            3,
+            2,
+            "跟踪参考点怎么选",
+            "默认 Neck 通常最稳定。Hip 适合下肢动作或肩颈遮挡较多的场景；左右肩只在对应肩部始终更清楚时尝试。\n\n"
+            "如果报告提示单人关联重投影误差过高，可回到这里换参考点后重新运行。",
+            columnspan=2,
+        )
+        self.tracked_keypoint_box = ctk.CTkComboBox(
+            self.advanced_frame,
+            values=list(TRACKED_KEYPOINT_OPTIONS.keys()),
+            width=360,
+        )
+        self.tracked_keypoint_box.grid(row=4, column=2, columnspan=2, sticky="ew", padx=(0, 10), pady=(0, 10))
+        self.tracked_keypoint_box.set(TRACKED_KEYPOINT_LABELS["Neck"])
         self.feet_floor_var = ctk.BooleanVar(value=False)
         self.symmetry_var = ctk.BooleanVar(value=True)
         self.simple_model_var = ctk.BooleanVar(value=False)
@@ -591,7 +701,7 @@ class Pose2SimChineseApp(ctk.CTk):
             self.advanced_frame,
             "启用足部贴地修正",
             self.feet_floor_var,
-            3,
+            5,
             0,
             "足部贴地修正",
             "尝试把足部标记点调整到更合理的地面关系。适合站立、步态等地面接触明显的动作；跳跃腾空或非地面动作不建议开启。",
@@ -600,7 +710,7 @@ class Pose2SimChineseApp(ctk.CTk):
             self.advanced_frame,
             "启用左右对称",
             self.symmetry_var,
-            3,
+            5,
             1,
             "左右对称",
             "OpenSim 缩放时假设左右肢段尺寸对称。大多数普通分析保持开启；如果受试者明显不对称或有特殊假肢/支具，才考虑关闭。",
@@ -609,7 +719,7 @@ class Pose2SimChineseApp(ctk.CTk):
             self.advanced_frame,
             "使用快速简化 OpenSim 模型",
             self.simple_model_var,
-            3,
+            5,
             2,
             "简化 OpenSim 模型",
             "可以降低运行复杂度，但模型细节更少。首次分析建议关闭，只有运行失败或需要快速预览时再尝试。",
@@ -623,7 +733,7 @@ class Pose2SimChineseApp(ctk.CTk):
         self._title(tab, "6. 运行与输出", 0)
         buttons = ctk.CTkFrame(tab, fg_color="transparent")
         buttons.grid(row=1, column=0, sticky="ew", padx=18, pady=8)
-        ctk.CTkButton(buttons, text="运行 / 更新输出", command=self.run_pipeline).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(buttons, text="运行输出", command=self.run_pipeline).pack(side="left", padx=(0, 8))
         ctk.CTkButton(buttons, text="打开输出目录", command=self.open_output_dir).pack(side="left")
         self.run_text = ctk.CTkTextbox(tab)
         self.run_text.grid(row=2, column=0, sticky="nsew", padx=18, pady=12)
@@ -673,10 +783,21 @@ class Pose2SimChineseApp(ctk.CTk):
         self._set_entry_value(self.sync_times_entry, ", ".join(f"{value:g}" for value in settings.sync_times_seconds))
         self._set_combo_by_value(self.pose_model_box, POSE_MODEL_OPTIONS, settings.pose_model)
         self._set_combo_by_value(self.speed_box, SPEED_PRESET_OPTIONS, settings.speed_preset)
+        self._set_combo_by_value(
+            self.target_mode_box,
+            TARGET_SELECTION_OPTIONS,
+            "manual_sync" if settings.manual_sync_selection else "auto",
+        )
+        self._set_combo_by_value(self.tracked_keypoint_box, TRACKED_KEYPOINT_OPTIONS, settings.tracked_keypoint)
         self._set_combo_by_value(self.calibration_mode, CALIBRATION_MODE_OPTIONS, settings.calibration_mode)
         self._set_entry_value(self.intrinsics_square_entry, f"{settings.intrinsics_square_size_mm:g}")
         self._set_entry_value(self.extrinsics_square_entry, f"{settings.extrinsics_square_size_mm:g}")
         self._set_combo_by_value(self.board_position_box, BOARD_POSITION_OPTIONS, settings.extrinsics_board_position)
+        self._set_combo_by_value(
+            self.external_calibration_format_box,
+            EXTERNAL_CALIBRATION_FORMAT_OPTIONS,
+            settings.external_calibration_format,
+        )
         self.marker_aug_var.set(settings.marker_augmentation)
         self.save_overlay_var.set(settings.save_overlay_video)
         self.feet_floor_var.set(settings.feet_on_floor)
@@ -685,6 +806,7 @@ class Pose2SimChineseApp(ctk.CTk):
         self._set_entry_value(self.sync_range_entry, f"{settings.sync_search_range_seconds:g}")
         self._set_entry_value(self.filter_entry, f"{settings.filter_cutoff_hz:g}")
         self._on_calibration_mode_change()
+        self._on_external_calibration_format_change()
 
     def _settings(self) -> PipelineSettings:
         workspace = self._current_workspace()
@@ -697,9 +819,10 @@ class Pose2SimChineseApp(ctk.CTk):
         frame_end = self._optional_int(self.frame_end_entry.get())
         intrinsics_square = self._optional_float(self.intrinsics_square_entry.get()) or 35.0
         extrinsics_square = self._optional_float(self.extrinsics_square_entry.get()) or 45.0
-        sync_times = [float(v.strip()) for v in self.sync_times_entry.get().split(",") if v.strip()]
+        sync_times = parse_float_list(self.sync_times_entry.get())
         calibration_mode = self._calibration_mode_value()
         scene_points = self._scene_points_table_text() if calibration_mode == "scene" else ""
+        target_selection = self._target_selection_value()
         return PipelineSettings(
             project_name=workspace.name,
             multi_person=multi_person,
@@ -717,10 +840,14 @@ class Pose2SimChineseApp(ctk.CTk):
             extrinsics_square_size_mm=extrinsics_square,
             extrinsics_extension=workspace.calibration_extension("extrinsics"),
             extrinsics_board_position=self._board_position_value(),
+            external_calibration_format=self._external_calibration_format_value(),
             scene_points_text=scene_points,
             skip_synchronization=self.skip_sync_var.get(),
             sync_times_seconds=sync_times,
             sync_search_range_seconds=self._optional_float(self.sync_range_entry.get()) or 2.0,
+            tracking_mode="sports2d",
+            tracked_keypoint=self._tracked_keypoint_value(),
+            manual_sync_selection=target_selection == "manual_sync",
             marker_augmentation=self.marker_aug_var.get(),
             use_simple_model=self.simple_model_var.get(),
             save_overlay_video=self.save_overlay_var.get(),
@@ -741,6 +868,18 @@ class Pose2SimChineseApp(ctk.CTk):
     def _board_position_value(self) -> str:
         return BOARD_POSITION_OPTIONS.get(self.board_position_box.get(), self.board_position_box.get())
 
+    def _external_calibration_format_value(self) -> str:
+        return EXTERNAL_CALIBRATION_FORMAT_OPTIONS.get(
+            self.external_calibration_format_box.get(),
+            self.external_calibration_format_box.get(),
+        )
+
+    def _target_selection_value(self) -> str:
+        return TARGET_SELECTION_OPTIONS.get(self.target_mode_box.get(), self.target_mode_box.get())
+
+    def _tracked_keypoint_value(self) -> str:
+        return TRACKED_KEYPOINT_OPTIONS.get(self.tracked_keypoint_box.get(), self.tracked_keypoint_box.get())
+
     @staticmethod
     def _optional_float(value: str) -> float | None:
         value = value.strip()
@@ -757,8 +896,63 @@ class Pose2SimChineseApp(ctk.CTk):
 
     @staticmethod
     def _float_list(value: str) -> list[float]:
-        parts = [part.strip() for part in value.replace("，", ",").split(",") if part.strip()]
-        return [float(part) for part in parts]
+        return parse_float_list(value)
+
+    def _add_scene_point_row(self, coords: list[float] | None = None, note: str = "") -> None:
+        point_number = len(self.scene_point_entries) + 1
+        row_index = point_number + 1
+        point_entry = ctk.CTkEntry(self.scene_points_frame, width=70)
+        x_entry = ctk.CTkEntry(self.scene_points_frame)
+        y_entry = ctk.CTkEntry(self.scene_points_frame)
+        z_entry = ctk.CTkEntry(self.scene_points_frame)
+        note_entry = ctk.CTkEntry(self.scene_points_frame)
+        values = [
+            f"P{point_number}",
+            "" if coords is None else str(coords[0]),
+            "" if coords is None else str(coords[1]),
+            "" if coords is None else str(coords[2]),
+            note,
+        ]
+        for entry, value, col in [
+            (point_entry, values[0], 0),
+            (x_entry, values[1], 1),
+            (y_entry, values[2], 2),
+            (z_entry, values[3], 3),
+            (note_entry, values[4], 4),
+        ]:
+            if value:
+                entry.insert(0, value)
+            entry.grid(row=row_index, column=col, sticky="ew", padx=(0, 8), pady=2)
+        self.scene_point_entries.append((point_entry, x_entry, y_entry, z_entry, note_entry))
+
+    def _add_empty_scene_point_row(self) -> None:
+        if len(self.scene_point_entries) >= MAX_SCENE_POINTS:
+            messagebox.showinfo(
+                "场景点数量上限",
+                "最多 15 个点。请优先选择分布更好、各机位都清楚可见的点。",
+            )
+            return
+        self._add_scene_point_row()
+        self._update_scene_point_buttons()
+
+    def _delete_last_scene_point_row(self) -> None:
+        if len(self.scene_point_entries) <= MIN_SCENE_POINTS:
+            messagebox.showinfo("场景点数量下限", "场景点外参至少需要 6 个完整点。")
+            return
+        entries = self.scene_point_entries.pop()
+        for entry in entries:
+            entry.destroy()
+        self._update_scene_point_buttons()
+
+    def _update_scene_point_buttons(self) -> None:
+        if not hasattr(self, "add_scene_point_button"):
+            return
+        self.add_scene_point_button.configure(
+            state="disabled" if len(self.scene_point_entries) >= MAX_SCENE_POINTS else "normal"
+        )
+        self.delete_scene_point_button.configure(
+            state="disabled" if len(self.scene_point_entries) <= MIN_SCENE_POINTS else "normal"
+        )
 
     def _scene_points_table_text(self) -> str:
         lines = ["点编号,X,Y,Z,现场说明"]
@@ -773,6 +967,11 @@ class Pose2SimChineseApp(ctk.CTk):
             if not point or not x or not y or not z:
                 raise ValueError("场景点表格中每一行都需要点编号、X、Y、Z；不用的行请全部留空。")
             lines.append(f"{point},{x},{y},{z},{note}")
+        point_count = len(lines) - 1
+        if point_count < MIN_SCENE_POINTS:
+            raise ValueError("场景点外参至少需要 6 个完整点。")
+        if point_count > MAX_SCENE_POINTS:
+            raise ValueError("场景点外参最多支持 15 个完整点。")
         return "\n".join(lines)
 
     def _append(self, widget: ctk.CTkTextbox, text: str) -> None:
@@ -808,6 +1007,264 @@ class Pose2SimChineseApp(ctk.CTk):
         thread = threading.Thread(target=target, daemon=True)
         thread.start()
 
+    def _confirm_file_order(self, files: list[Path], title: str, body: str) -> list[Path] | None:
+        if not files:
+            return None
+        ordered = list(files)
+        result: list[Path] | None = None
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.geometry("760x460")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(dialog, text=body, anchor="w", justify="left", wraplength=700).grid(
+            row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(16, 8)
+        )
+        listbox = tk.Listbox(dialog, height=14)
+        listbox.grid(row=1, column=0, sticky="nsew", padx=(16, 8), pady=8)
+
+        def refresh(selected: int | None = None) -> None:
+            listbox.delete(0, tk.END)
+            for index, path in enumerate(ordered, start=1):
+                listbox.insert(tk.END, f"cam{index:02d}  ←  {path.name}")
+            if selected is not None and ordered:
+                selected = max(0, min(selected, len(ordered) - 1))
+                listbox.selection_set(selected)
+                listbox.see(selected)
+
+        def selected_index() -> int | None:
+            selected = listbox.curselection()
+            return int(selected[0]) if selected else None
+
+        def move(delta: int) -> None:
+            index = selected_index()
+            if index is None:
+                return
+            new_index = index + delta
+            if new_index < 0 or new_index >= len(ordered):
+                return
+            ordered[index], ordered[new_index] = ordered[new_index], ordered[index]
+            refresh(new_index)
+
+        def remove_selected() -> None:
+            index = selected_index()
+            if index is None:
+                return
+            ordered.pop(index)
+            refresh(index)
+
+        def confirm() -> None:
+            nonlocal result
+            if not ordered:
+                messagebox.showwarning("没有文件", "请至少保留 1 个文件。", parent=dialog)
+                return
+            result = list(ordered)
+            dialog.destroy()
+
+        button_col = ctk.CTkFrame(dialog, fg_color="transparent")
+        button_col.grid(row=1, column=1, sticky="ns", padx=(0, 16), pady=8)
+        ctk.CTkButton(button_col, text="上移", command=lambda: move(-1)).pack(fill="x", pady=(0, 8))
+        ctk.CTkButton(button_col, text="下移", command=lambda: move(1)).pack(fill="x", pady=(0, 8))
+        ctk.CTkButton(button_col, text="删除", fg_color="#64748b", command=remove_selected).pack(fill="x")
+
+        footer = ctk.CTkFrame(dialog, fg_color="transparent")
+        footer.grid(row=2, column=0, columnspan=2, sticky="ew", padx=16, pady=(8, 16))
+        ctk.CTkButton(footer, text="取消", fg_color="#64748b", command=dialog.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(footer, text="确认顺序", command=confirm).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        refresh(0)
+        self.wait_window(dialog)
+        return result
+
+    def _validate_external_calibration_files(self, files: list[Path], fmt: str) -> bool:
+        expected = EXTERNAL_CALIBRATION_EXTENSIONS.get(fmt)
+        if not expected:
+            messagebox.showinfo(
+                "高级外部校准格式",
+                "该格式没有通用扩展名校验。GUI 会复制文件并写入 Config，请确认文件结构符合 Pose2Sim 官方说明。",
+            )
+            return True
+        bad_files = [
+            path.name
+            for path in files
+            if not any(path.name.lower().endswith(extension) for extension in expected)
+        ]
+        if not bad_files:
+            return True
+        messagebox.showerror(
+            "外部校准文件类型不匹配",
+            "当前格式预期文件类型：" + "、".join(expected) + "\n\n不匹配文件：\n" + "\n".join(bad_files),
+        )
+        return False
+
+    @staticmethod
+    def _count_trial_videos(workspace: ProjectWorkspace) -> int:
+        folder = workspace.project_dir / "videos"
+        return len(list(folder.glob("*.mp4"))) if folder.exists() else 0
+
+    @staticmethod
+    def _count_intrinsics(workspace: ProjectWorkspace) -> int:
+        folder = workspace.project_dir / "calibration" / "intrinsics"
+        if not folder.exists():
+            return 0
+        return sum(1 for child in folder.iterdir() if child.is_dir() and any(path.is_file() for path in child.iterdir()))
+
+    @staticmethod
+    def _count_extrinsics(workspace: ProjectWorkspace) -> int:
+        folder = workspace.project_dir / "calibration" / "extrinsics"
+        if not folder.exists():
+            return 0
+        return len([path for path in folder.iterdir() if path.is_file()])
+
+    def _validate_before_run(self, workspace: ProjectWorkspace, settings: PipelineSettings, status: ProjectStatus) -> bool:
+        video_count = self._count_trial_videos(workspace)
+        if video_count < 2:
+            messagebox.showerror("运行前检查失败", "至少需要导入 2 个机位的测试视频。")
+            return False
+        if settings.sync_times_seconds and len(settings.sync_times_seconds) not in {1, video_count}:
+            messagebox.showerror(
+                "运行前检查失败",
+                f"同步动作时间应填写 1 个值，或与机位数量一致的 {video_count} 个值。",
+            )
+            return False
+        if status.has_calibration_toml:
+            return True
+        if settings.calibration_mode == "convert":
+            if not status.has_calibration_source:
+                messagebox.showerror("运行前检查失败", "当前选择外部校准，但没有发现外部校准文件。")
+                return False
+            return True
+        intrinsics_count = self._count_intrinsics(workspace)
+        extrinsics_count = self._count_extrinsics(workspace)
+        if intrinsics_count != video_count:
+            messagebox.showerror(
+                "运行前检查失败",
+                f"内参资料数量为 {intrinsics_count}，测试视频机位为 {video_count}。请按相同相机顺序导入。",
+            )
+            return False
+        if extrinsics_count != video_count:
+            messagebox.showerror(
+                "运行前检查失败",
+                f"外参资料数量为 {extrinsics_count}，测试视频机位为 {video_count}。请按相同相机顺序导入。",
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _will_run_step(status: ProjectStatus, config_changed: bool, report_only: bool, step: str) -> bool:
+        if report_only:
+            return False
+        if config_changed:
+            return True
+        return step in status.missing_steps
+
+    def _confirm_calibration_window_guide(self) -> bool:
+        return messagebox.askokcancel(
+            "校准图片确认说明",
+            "接下来 Pose2Sim 可能会弹出英文图片窗口，需要你判断角点是否可靠。\n\n"
+            "按键含义：\n"
+            "Y：接受当前自动识别的角点。\n"
+            "N：跳过当前图片。\n"
+            "C：手动点选角点。\n"
+            "H：表示该点不可见。\n\n"
+            "手动点选时：左键添加点，右键撤销。\n\n"
+            "只有角点完整、清晰、顺序确定，并且覆盖画面范围足够时才按 Y。"
+            "角点很小、模糊、被遮挡、反光或顺序不确定时，不要为了省事直接接受。是否继续？",
+        )
+
+    def _confirm_manual_sync_guide(self) -> bool:
+        return messagebox.askokcancel(
+            "官方手动选人/同步说明",
+            "你选择了“官方手动选人/同步”。运行中会出现 Pose2Sim 原生英文窗口，"
+            "用于人工确认检测目标或同步信息。\n\n"
+            "适合场景：自动跟踪错人、遮挡明显、多人干扰、同步动作不够清楚。\n\n"
+            "如果只是单人、无遮挡、同步动作清楚，建议保持“自动跟踪（推荐）”。是否继续？",
+        )
+
+    def _confirm_config_changes(self, preview: ConfigPreviewResult) -> bool:
+        diff_lines = list(
+            difflib.unified_diff(
+                preview.existing_text.splitlines(),
+                preview.merged_text.splitlines(),
+                fromfile="当前 Config.toml",
+                tofile="GUI 参数合并后",
+                lineterm="",
+            )
+        )
+        diff_text = "\n".join(diff_lines) or "Config 内容将被重新格式化。"
+        result = False
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("确认 Config 变更")
+        dialog.geometry("980x640")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            dialog,
+            text="检测到当前 GUI 参数会修改已有 Config.toml。确认后会先自动备份，再写入新配置并继续运行。",
+            anchor="w",
+            justify="left",
+            wraplength=920,
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        textbox = ctk.CTkTextbox(dialog)
+        textbox.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        textbox.insert("end", diff_text)
+        textbox.configure(state="disabled")
+
+        def confirm() -> None:
+            nonlocal result
+            result = True
+            dialog.destroy()
+
+        footer = ctk.CTkFrame(dialog, fg_color="transparent")
+        footer.grid(row=2, column=0, sticky="ew", padx=16, pady=(8, 16))
+        ctk.CTkButton(footer, text="取消运行", fg_color="#64748b", command=dialog.destroy).pack(side="right", padx=(8, 0))
+        ctk.CTkButton(footer, text="备份并继续", command=confirm).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self.wait_window(dialog)
+        return result
+
+    def _show_run_result(self, result: RunResult, project_dir: Path, output_dir: Path) -> None:
+        self._refresh_project_status()
+        if result.ok:
+            try:
+                diagnostics = quality_diagnostics_for_project(project_dir)
+                html_path, excel_path = find_report_outputs(project_dir, output_dir)
+                issue_lines = diagnostic_issue_lines(diagnostics)
+                lines = [
+                    "运行成功。",
+                    diagnostics.summary,
+                    "",
+                    f"HTML 报告：{html_path or '未找到'}",
+                    f"Excel 报告：{excel_path or '未找到'}",
+                    "",
+                    "主要风险：",
+                ]
+                if issue_lines:
+                    lines.extend(f"- {line}" for line in issue_lines)
+                else:
+                    lines.append("- 未发现明显质量风险。")
+                messagebox.showinfo("运行成功", "\n".join(lines))
+            except Exception as exc:
+                messagebox.showinfo(
+                    "运行成功",
+                    f"运行成功，但读取置信度报告时遇到问题：{exc}\n\n请打开输出目录查看 HTML/Excel 报告。",
+                )
+            return
+
+        tail = [line for line in result.tail_lines[-10:] if line.strip()]
+        tail_text = "\n".join(tail) if tail else "没有捕获到日志末尾。"
+        reason = result.error_summary or f"子进程退出码 {result.return_code}。"
+        messagebox.showerror(
+            "运行失败",
+            f"运行失败。\n\n最可能原因：{reason}\n\n最近日志：\n{tail_text}\n\n请查看运行页完整日志和项目 logs.txt。",
+        )
+
     def _on_calibration_mode_change(self, _choice: str | None = None) -> None:
         if not hasattr(self, "scene_points_frame"):
             return
@@ -815,12 +1272,28 @@ class Pose2SimChineseApp(ctk.CTk):
         if mode == "scene":
             self.scene_points_frame.grid()
             self.board_position_frame.grid_remove()
+            self.external_calibration_frame.grid_remove()
         elif mode == "board":
             self.scene_points_frame.grid_remove()
             self.board_position_frame.grid()
+            self.external_calibration_frame.grid_remove()
         else:
             self.scene_points_frame.grid_remove()
             self.board_position_frame.grid_remove()
+            self.external_calibration_frame.grid()
+        self._on_external_calibration_format_change()
+
+    def _on_external_calibration_format_change(self, _choice: str | None = None) -> None:
+        if not hasattr(self, "external_calibration_description"):
+            return
+        fmt = self._external_calibration_format_value()
+        text = EXTERNAL_CALIBRATION_DESCRIPTIONS.get(fmt, "高级格式。请确认文件符合 Pose2Sim 官方说明。")
+        expected = EXTERNAL_CALIBRATION_EXTENSIONS.get(fmt)
+        if expected:
+            text += " 预期文件类型：" + "、".join(expected)
+        else:
+            text += " GUI 不限制扩展名。"
+        self.external_calibration_description.configure(text=text)
 
     def _toggle_advanced_parameters(self) -> None:
         if self.advanced_frame.winfo_ismapped():
@@ -835,6 +1308,8 @@ class Pose2SimChineseApp(ctk.CTk):
         self.sync_range_entry.insert(0, "2")
         self.filter_entry.delete(0, "end")
         self.filter_entry.insert(0, "6")
+        self.target_mode_box.set(TARGET_SELECTION_LABELS["auto"])
+        self.tracked_keypoint_box.set(TRACKED_KEYPOINT_LABELS["Neck"])
         self.feet_floor_var.set(False)
         self.symmetry_var.set(True)
         self.simple_model_var.set(False)
@@ -846,6 +1321,15 @@ class Pose2SimChineseApp(ctk.CTk):
         self.environment_text.insert("end", "\n".join(status.to_chinese_lines()))
 
     def update_pose2sim(self) -> None:
+        proceed = messagebox.askyesno(
+            "确认更新 Pose2Sim",
+            "当前 GUI 主要按 Pose2Sim 0.10.43 验证。GitHub Releases 当前已到 v0.10.47，"
+            "最新版可能改变安装方式、模型下载地址或 Config 字段。\n\n"
+            "继续后会运行 pip install --upgrade pose2sim，并在结束后重新检查环境。是否继续？",
+        )
+        if not proceed:
+            self._append(self.environment_text, "已取消 Pose2Sim 更新。")
+            return
         if self.update_button is not None:
             self.update_button.configure(state="disabled", text="正在更新...")
         self.environment_text.delete("1.0", "end")
@@ -938,7 +1422,21 @@ class Pose2SimChineseApp(ctk.CTk):
             messagebox.showerror("项目错误", str(exc))
 
     def import_trial_videos(self) -> None:
-        files = [Path(p) for p in filedialog.askopenfilenames(title="选择测试视频")]
+        files = [
+            Path(p)
+            for p in filedialog.askopenfilenames(
+                title="选择测试视频",
+                filetypes=[("视频文件", "*.mp4 *.mov *.avi *.mkv *.wmv *.m4v *.webm"), ("所有文件", "*.*")],
+            )
+        ]
+        if not files:
+            return
+        files = self._confirm_file_order(
+            files,
+            "确认测试视频机位顺序",
+            "请确认每个文件对应的相机编号。Pose2Sim 会按这个顺序保存为 cam01、cam02……；"
+            "内参、外参和测试视频必须使用同一相机顺序。",
+        )
         if not files:
             return
         try:
@@ -964,7 +1462,23 @@ class Pose2SimChineseApp(ctk.CTk):
         self._thread(task, "开始导入测试视频...", "video")
 
     def import_intrinsics(self) -> None:
-        files = [Path(p) for p in filedialog.askopenfilenames(title="选择每台相机的内参棋盘格视频")]
+        files = [
+            Path(p)
+            for p in filedialog.askopenfilenames(
+                title="选择每台相机的内参棋盘格视频或图片",
+                filetypes=[
+                    ("视频/图片", "*.mp4 *.mov *.avi *.mkv *.wmv *.m4v *.webm *.png *.jpg *.jpeg *.bmp *.tif *.tiff"),
+                    ("所有文件", "*.*"),
+                ],
+            )
+        ]
+        if not files:
+            return
+        files = self._confirm_file_order(
+            files,
+            "确认内参资料相机顺序",
+            "请确认内参棋盘格资料对应的相机编号。这个顺序必须和测试视频、外参资料一致。",
+        )
         if not files:
             return
         try:
@@ -988,7 +1502,23 @@ class Pose2SimChineseApp(ctk.CTk):
         self._thread(task, "开始导入内参棋盘格视频...", "calibration")
 
     def import_extrinsics(self) -> None:
-        files = [Path(p) for p in filedialog.askopenfilenames(title="选择每台相机的外参视频或图片")]
+        files = [
+            Path(p)
+            for p in filedialog.askopenfilenames(
+                title="选择每台相机的外参视频或图片",
+                filetypes=[
+                    ("视频/图片", "*.mp4 *.mov *.avi *.mkv *.wmv *.m4v *.webm *.png *.jpg *.jpeg *.bmp *.tif *.tiff"),
+                    ("所有文件", "*.*"),
+                ],
+            )
+        ]
+        if not files:
+            return
+        files = self._confirm_file_order(
+            files,
+            "确认外参资料相机顺序",
+            "请确认外参资料对应的相机编号。这个顺序必须和测试视频、内参资料一致。",
+        )
         if not files:
             return
         try:
@@ -1010,6 +1540,33 @@ class Pose2SimChineseApp(ctk.CTk):
                 self._log(f"外参导入失败: {exc}")
 
         self._thread(task, "开始导入外参资料...", "calibration")
+
+    def import_external_calibration(self) -> None:
+        files = [Path(p) for p in filedialog.askopenfilenames(title="选择外部校准文件")]
+        if not files:
+            return
+        fmt = self._external_calibration_format_value()
+        if not self._validate_external_calibration_files(files, fmt):
+            return
+        try:
+            workspace = self._current_workspace()
+        except Exception as exc:
+            messagebox.showerror("项目错误", str(exc))
+            return
+
+        def task() -> None:
+            try:
+                outputs = workspace.import_external_calibration(files)
+                self._queue_log("calibration", f"外部校准文件导入完成，格式：{fmt}")
+                for path in outputs:
+                    self._queue_log("calibration", str(path))
+                self.after(0, self._refresh_project_status)
+                self._log("外部校准文件导入完成。")
+            except Exception as exc:
+                self._queue_log("calibration", f"外部校准导入失败: {exc}")
+                self._log(f"外部校准导入失败: {exc}")
+
+        self._thread(task, "开始导入外部校准文件...", "calibration")
 
     def _make_checkerboard(self, *, square_entry: ctk.CTkEntry, page_size: str, purpose: str) -> None:
         try:
@@ -1059,34 +1616,68 @@ class Pose2SimChineseApp(ctk.CTk):
             workspace = self._current_workspace()
             settings = self._settings()
             status_before = workspace.status()
-            config_result = workspace.apply_settings_to_config(settings)
-            if config_result.changed:
+            config_preview = workspace.preview_settings_to_config(settings)
+            report_only = status_before.has_kinematics and not config_preview.changed
+            if report_only:
+                config_result = None
+            else:
+                if not self._validate_before_run(workspace, settings, status_before):
+                    return
+                will_calibrate = (
+                    settings.calibration_mode != "convert"
+                    and not status_before.has_calibration_toml
+                    and self._will_run_step(status_before, config_preview.changed, report_only, "calibration")
+                )
+                will_manual_sync = (
+                    settings.manual_sync_selection
+                    and not settings.skip_synchronization
+                    and self._will_run_step(status_before, config_preview.changed, report_only, "synchronization")
+                )
+                if will_calibrate and not self._confirm_calibration_window_guide():
+                    self._append(self.run_text, "已取消运行，校准图片确认说明未确认。")
+                    return
+                if will_manual_sync and not self._confirm_manual_sync_guide():
+                    self._append(self.run_text, "已取消运行，官方手动选人/同步说明未确认。")
+                    return
+                if config_preview.changed and config_preview.backup_required:
+                    if not self._confirm_config_changes(config_preview):
+                        self._append(self.run_text, "已取消运行，Config.toml 未修改。")
+                        return
+                config_result = workspace.apply_settings_to_config(settings)
+            if config_result is None:
+                self._append(self.run_text, "Config 未变化，将仅重新生成报告和输出目录。")
+            elif config_result.changed:
                 if config_result.backup_path:
                     self._append(self.run_text, f"Config 已变化，已备份旧配置：{config_result.backup_path}")
                 else:
                     self._append(self.run_text, f"已生成配置：{config_result.path}")
             else:
-                self._append(self.run_text, "Config 未变化，将按现有配置运行/更新输出。")
+                self._append(self.run_text, "Config 未变化，将按现有配置运行输出。")
             self._refresh_project_status()
         except Exception as exc:
             messagebox.showerror("运行前检查失败", str(exc))
             return
 
         def task() -> None:
-            if status_before.has_kinematics and not config_result.changed:
-                self._log("检测到已有 .mot，Config 未变化：仅更新报告和输出目录。")
-                code = self.runner.generate_reports(workspace.project_dir, self._log)
+            if config_result is None:
+                self._log("检测到已有 .mot，Config 未变化：仅重新生成报告和输出目录。")
+                result = self.runner.generate_reports(workspace.project_dir, self._log)
             elif config_result.changed:
+                removed = workspace.clear_analysis_results()
+                if removed:
+                    self._log(f"已清理上次分析中间结果 {len(removed)} 项，重新运行完整 Pose2Sim 流程。")
                 self._log("Config 已更新：重新运行完整 Pose2Sim 流程。")
-                code = self.runner.run_all(workspace.project_dir, settings.skip_synchronization, self._log)
+                result = self.runner.run_all(workspace.project_dir, settings.skip_synchronization, self._log)
             else:
-                steps = workspace.status().missing_steps
-                self._log("从缺失阶段继续：" + " → ".join(steps))
-                code = self.runner.run_steps(workspace.project_dir, steps, settings.skip_synchronization, self._log)
-            self._log(f"运行 / 更新输出结束，退出码 {code}。")
-            self.after(0, self._refresh_project_status)
+                removed = workspace.clear_analysis_results()
+                if removed:
+                    self._log(f"已清理上次分析中间结果 {len(removed)} 项。")
+                self._log("Config 未变化但项目没有完整 .mot：默认重新运行完整 Pose2Sim 流程。")
+                result = self.runner.run_all(workspace.project_dir, settings.skip_synchronization, self._log)
+            self._log(f"运行输出结束，退出码 {result.return_code}。")
+            self.after(0, lambda: self._show_run_result(result, workspace.project_dir, workspace.output_dir))
 
-        self._thread(task, "开始运行 / 更新输出...")
+        self._thread(task, "开始运行输出...")
 
     def run_existing_config(self) -> None:
         try:
@@ -1101,9 +1692,9 @@ class Pose2SimChineseApp(ctk.CTk):
             return
 
         def task() -> None:
-            code = self.runner.run_all(workspace.project_dir, skip_synchronization, self._log)
-            self._log(f"按现有 Config 运行结束，退出码 {code}。")
-            self.after(0, self._refresh_project_status)
+            result = self.runner.run_all(workspace.project_dir, skip_synchronization, self._log)
+            self._log(f"按现有 Config 运行结束，退出码 {result.return_code}。")
+            self.after(0, lambda: self._show_run_result(result, workspace.project_dir, workspace.output_dir))
 
         self._thread(task, "开始按现有 Config.toml 运行 Pose2Sim...")
 
@@ -1122,9 +1713,9 @@ class Pose2SimChineseApp(ctk.CTk):
             return
 
         def task() -> None:
-            code = self.runner.run_steps(workspace.project_dir, steps, skip_synchronization, self._log)
-            self._log(f"缺失阶段运行结束，退出码 {code}。")
-            self.after(0, self._refresh_project_status)
+            result = self.runner.run_steps(workspace.project_dir, steps, skip_synchronization, self._log)
+            self._log(f"缺失阶段运行结束，退出码 {result.return_code}。")
+            self.after(0, lambda: self._show_run_result(result, workspace.project_dir, workspace.output_dir))
 
         self._thread(task, "开始从缺失阶段继续运行 Pose2Sim...")
 
@@ -1136,8 +1727,9 @@ class Pose2SimChineseApp(ctk.CTk):
             return
 
         def task() -> None:
-            code = self.runner.generate_reports(workspace.project_dir, self._log)
-            self._log(f"报告生成结束，退出码 {code}。")
+            result = self.runner.generate_reports(workspace.project_dir, self._log)
+            self._log(f"报告生成结束，退出码 {result.return_code}。")
+            self.after(0, lambda: self._show_run_result(result, workspace.project_dir, workspace.output_dir))
 
         self._thread(task, "开始生成报告...")
 

@@ -46,3 +46,23 @@ def test_inspect_batch_and_multiperson_project(tmp_path: Path) -> None:
     assert "批处理项目" in status.kind
     assert "多人项目" in status.kind
     assert status.recommended_action == "仅生成报告"
+
+
+def test_missing_steps_skip_marker_augmentation_when_disabled(tmp_path: Path) -> None:
+    (tmp_path / "Config.toml").write_text(
+        "[kinematics]\nuse_augmentation=false\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "calibration").mkdir()
+    (tmp_path / "calibration" / "Calib_scene.toml").write_text("fake", encoding="utf-8")
+    (tmp_path / "pose").mkdir()
+    (tmp_path / "pose" / "cam01_json").mkdir()
+    (tmp_path / "pose-sync").mkdir()
+    (tmp_path / "pose-sync" / "cam01_json").mkdir()
+    (tmp_path / "pose-3d").mkdir()
+    (tmp_path / "pose-3d" / "sample.trc").write_text("fake", encoding="utf-8")
+
+    status = inspect_project(tmp_path)
+
+    assert "markerAugmentation" not in status.missing_steps
+    assert "kinematics" in status.missing_steps

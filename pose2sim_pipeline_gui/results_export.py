@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from importlib.resources import files
 from pathlib import Path
 
 from .paths import assert_under_workspace
@@ -49,6 +50,28 @@ def _sync_directory(source: Path, target: Path) -> None:
         _copy_file(file_path, target / relative)
 
 
+def _copy_opensim_geometry(target_kinematics_dir: Path) -> None:
+    try:
+        source = Path(str(files("Pose2Sim") / "OpenSim_Setup" / "Geometry"))
+    except Exception:
+        return
+    if source.exists():
+        _sync_directory(source, target_kinematics_dir / "Geometry")
+
+
+def _write_opensim_readme(target_kinematics_dir: Path) -> None:
+    target_kinematics_dir.mkdir(parents=True, exist_ok=True)
+    readme = target_kinematics_dir / "OpenSim_查看说明.txt"
+    readme.write_text(
+        "OpenSim 查看顺序：\n"
+        "1. 先在 OpenSim 中打开本目录下的 .osim 模型。\n"
+        "2. 再加载同名或对应的 .mot 运动文件。\n"
+        "3. 如果模型没有骨架外观，请确认本目录下是否有 Geometry 文件夹，或在 OpenSim 中设置 Geometry 搜索路径。\n"
+        "4. 如果模型明显失真，优先检查校准外参、同步、遮挡、IK marker error 和身高/体重输入；这通常不是 .mot 文件缺失造成的。\n",
+        encoding="utf-8",
+    )
+
+
 def _export_single_project(project_dir: Path, output_dir: Path) -> None:
     for dirname in RESULT_DIRECTORIES:
         _sync_directory(project_dir / dirname, output_dir / dirname)
@@ -56,6 +79,11 @@ def _export_single_project(project_dir: Path, output_dir: Path) -> None:
         source = project_dir / filename
         if source.exists() and source.is_file():
             _copy_file(source, output_dir / filename)
+    kinematics_dir = output_dir / "kinematics"
+    if any(kinematics_dir.glob("*.osim")) or any(kinematics_dir.glob("*.mot")):
+        _copy_opensim_geometry(kinematics_dir)
+        _write_opensim_readme(kinematics_dir)
+
 
 
 def _is_trial_dir(path: Path) -> bool:

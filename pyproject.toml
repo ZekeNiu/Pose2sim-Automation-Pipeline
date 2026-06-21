@@ -3,10 +3,17 @@ name = "pose2sim-automation-pipeline"
 version = "0.1.0"
 description = "Chinese BAT-launched GUI pipeline for Pose2Sim."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "pose2sim>=0.10.43",
+  "customtkinter",
+  "pandas",
+  "plotly",
+  "openpyxl",
+  "pillow",
+  "toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
-

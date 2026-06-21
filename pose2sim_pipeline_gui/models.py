@@ -26,10 +26,14 @@ class PipelineSettings:
     extrinsics_square_size_mm: float = 45.0
     extrinsics_extension: str = "mp4"
     extrinsics_board_position: str = "horizontal"
+    external_calibration_format: str = "qualisys"
     scene_points_text: str = ""
     skip_synchronization: bool = False
     sync_times_seconds: list[float] = field(default_factory=list)
     sync_search_range_seconds: float = 2.0
+    tracking_mode: str = "sports2d"
+    tracked_keypoint: str = "Neck"
+    manual_sync_selection: bool = False
     marker_augmentation: bool = True
     use_simple_model: bool = False
     save_overlay_video: bool = True
@@ -68,6 +72,11 @@ class EnvironmentStatus:
     ffmpeg_path: str | None
     gpu_hint: str
     errors: list[str] = field(default_factory=list)
+    pandas_version: str | None = None
+    pillow_version: str | None = None
+    toml_version: str | None = None
+    ffprobe_path: str | None = None
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -81,9 +90,16 @@ class EnvironmentStatus:
             f"customtkinter: {self.customtkinter_version or '未检测到'}",
             f"plotly: {self.plotly_version or '未检测到'}",
             f"openpyxl: {self.openpyxl_version or '未检测到'}",
+            f"pandas: {self.pandas_version or '未检测到'}",
+            f"Pillow: {self.pillow_version or '未检测到'}",
+            f"toml: {self.toml_version or '未检测到'}",
             f"ffmpeg: {self.ffmpeg_path or '未检测到'}",
+            f"ffprobe: {self.ffprobe_path or '未检测到'}",
             f"加速提示: {self.gpu_hint}",
         ]
+        if self.warnings:
+            lines.append("提醒:")
+            lines.extend(f"- {warning}" for warning in self.warnings)
         if self.errors:
             lines.append("问题:")
             lines.extend(f"- {err}" for err in self.errors)

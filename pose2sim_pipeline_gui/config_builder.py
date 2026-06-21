@@ -23,6 +23,40 @@ DEFAULT_SCENE_POINTS = [
     [1.0, -0.3, 0.0],
 ]
 
+EXTERNAL_CALIBRATION_FORMAT_OPTIONS = {
+    "Qualisys（.qca.txt，常见实验室系统）": "qualisys",
+    "Vicon（.xcp）": "vicon",
+    "OpenCap（.pickle / .pkl）": "opencap",
+    "EasyMocap（.yml / .yaml）": "easymocap",
+    "BioCV（.calib）": "biocv",
+    "OptiTrack（高级，需符合 Pose2Sim 官方要求）": "optitrack",
+    "Caliscope（高级，通常无需转换）": "caliscope",
+    "Anipose（高级，通常无需转换）": "anipose",
+    "FreeMoCap（高级，通常无需转换）": "freemocap",
+}
+
+EXTERNAL_CALIBRATION_FORMAT_LABELS = {value: label for label, value in EXTERNAL_CALIBRATION_FORMAT_OPTIONS.items()}
+
+EXTERNAL_CALIBRATION_EXTENSIONS = {
+    "qualisys": [".qca.txt"],
+    "vicon": [".xcp"],
+    "opencap": [".pickle", ".pkl"],
+    "easymocap": [".yml", ".yaml"],
+    "biocv": [".calib"],
+}
+
+EXTERNAL_CALIBRATION_DESCRIPTIONS = {
+    "qualisys": "导入 Qualisys 导出的 .qca.txt 文件。Pose2Sim 会转换为 calibration/Calib_qualisys.toml。",
+    "vicon": "导入 Vicon 的 .xcp 文件。请确认相机数量和测试视频机位一致。",
+    "opencap": "导入 OpenCap 的 .pickle/.pkl 校准文件，通常需要成组文件。",
+    "easymocap": "导入 EasyMocap 的 intri/extri .yml 或 .yaml 文件。",
+    "biocv": "导入 BioCV 的 .calib 文件。",
+    "optitrack": "高级格式。GUI 只复制文件并写入 Config，请确认文件结构符合 Pose2Sim 官方说明。",
+    "caliscope": "高级格式。Pose2Sim 通常可直接使用，GUI 只复制文件并写入 Config。",
+    "anipose": "高级格式。Pose2Sim 通常可直接使用，GUI 只复制文件并写入 Config。",
+    "freemocap": "高级格式。Pose2Sim 通常可直接使用，GUI 只复制文件并写入 Config。",
+}
+
 
 def parse_scene_points(text: str) -> list[list[float]]:
     if not text.strip():
@@ -100,13 +134,13 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
             "save_video": "to_video" if settings.save_overlay_video else "none",
             "output_format": "openpose",
             "average_likelihood_threshold_pose": 0.5,
-            "tracking_mode": "sports2d",
+            "tracking_mode": settings.tracking_mode,
             "max_distance_px": 100,
             "handle_LR_swap": False,
             "undistort_points": False,
         },
         "synchronization": {
-            "synchronization_gui": False,
+            "synchronization_gui": bool(settings.manual_sync_selection),
             "display_sync_plots": False,
             "save_sync_plots": True,
             "keypoints_to_consider": "all",
@@ -145,8 +179,16 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
                 },
             },
             "convert": {
-                "convert_from": "qualisys",
+                "convert_from": settings.external_calibration_format,
+                "caliscope": {},
                 "qualisys": {"binning_factor": 1},
+                "optitrack": {},
+                "vicon": {},
+                "opencap": {},
+                "easymocap": {},
+                "biocv": {},
+                "anipose": {},
+                "freemocap": {},
             },
         },
         "personAssociation": {
@@ -154,7 +196,7 @@ def build_config_dict(project_dir: Path, settings: PipelineSettings) -> dict[str
             "single_person": {
                 "likelihood_threshold_association": 0.3,
                 "reproj_error_threshold_association": 20,
-                "tracked_keypoint": "Neck",
+                "tracked_keypoint": settings.tracked_keypoint,
             },
             "multi_person": {
                 "reconstruction_error_threshold": 0.1,

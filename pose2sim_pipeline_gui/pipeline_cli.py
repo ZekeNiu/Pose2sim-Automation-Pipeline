@@ -36,6 +36,10 @@ DEFAULT_STEPS = [
 ]
 
 
+def should_run_marker_augmentation(config_dicts: list[dict]) -> bool:
+    return any(bool(config.get("kinematics", {}).get("use_augmentation", True)) for config in config_dicts)
+
+
 def run_steps(project_dir: Path, steps: list[str], skip_synchronization: bool = False) -> None:
     from Pose2Sim.Pose2Sim import Pose2SimPipeline
 
@@ -63,6 +67,9 @@ def run_steps(project_dir: Path, steps: list[str], skip_synchronization: bool = 
         if step == "reports":
             generate_reports_for_project(project_dir, output_dir(project_dir.name))
         elif step == "markerAugmentation":
+            if not should_run_marker_augmentation(pipeline.config_dicts):
+                print("跳过标记点增强：当前 Config 已关闭 use_augmentation。", flush=True)
+                continue
             try:
                 pipeline.markerAugmentation()
             except Exception as exc:

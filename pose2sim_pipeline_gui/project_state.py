@@ -8,7 +8,7 @@ import toml
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm"}
-CALIBRATION_SOURCE_EXTENSIONS = {".qca.txt", ".xcp", ".pickle", ".pkl", ".yml", ".yaml", ".xml"}
+CALIBRATION_SOURCE_EXTENSIONS = {".qca.txt", ".xcp", ".pickle", ".pkl", ".yml", ".yaml", ".xml", ".calib"}
 
 
 @dataclass
@@ -27,6 +27,7 @@ class ProjectStatus:
     has_kinematics: bool = False
     mot_files: list[Path] = field(default_factory=list)
     calibration_type: str | None = None
+    marker_augmentation_enabled: bool = True
 
     @property
     def kind(self) -> str:
@@ -69,7 +70,9 @@ class ProjectStatus:
         if not self.has_pose_3d:
             steps.extend(["personAssociation", "triangulation", "filtering"])
         if not self.has_kinematics:
-            steps.extend(["markerAugmentation", "kinematics"])
+            if self.marker_augmentation_enabled:
+                steps.append("markerAugmentation")
+            steps.append("kinematics")
         steps.append("reports")
         seen: set[str] = set()
         return [step for step in steps if not (step in seen or seen.add(step))]
@@ -156,6 +159,12 @@ def inspect_project(project_dir: Path) -> ProjectStatus:
     is_batch = bool(children and (project_dir / "Config.toml").exists())
     configs = [config, *(_project_config(child) for child in children)]
     multi_person = any(bool(cfg.get("project", {}).get("multi_person")) for cfg in configs if cfg)
+    configs_with_values = [cfg for cfg in configs if cfg]
+    marker_augmentation_enabled = True
+    if configs_with_values:
+        marker_augmentation_enabled = any(
+            bool(cfg.get("kinematics", {}).get("use_augmentation", True)) for cfg in configs_with_values
+        )
     calibration_type = config.get("calibration", {}).get("calibration_type") if config else None
 
     all_dirs = [project_dir, *children]
@@ -175,5 +184,6 @@ def inspect_project(project_dir: Path) -> ProjectStatus:
         has_kinematics=bool(mot_files),
         mot_files=mot_files,
         calibration_type=str(calibration_type) if calibration_type is not None else None,
+        marker_augmentation_enabled=marker_augmentation_enabled,
     )
     return status
