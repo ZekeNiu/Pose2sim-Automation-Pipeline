@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from .caliscope_bridge import (
+    CaliscopeImportResult,
+    copy_caliscope_export_to_pose2sim,
+    ensure_caliscope_workspace,
+    find_caliscope_export,
+    validate_caliscope_export,
+)
 from .config_adapter import ConfigApplyResult, config_text, load_config, merged_config
 from .config_builder import build_config_dict, write_config
 from .environment import pose2sim_intrinsics_video_extraction_bug_present
@@ -214,6 +221,49 @@ class ProjectWorkspace:
             shutil.copy2(file_path, target)
             outputs.append(target)
         return outputs
+
+    def caliscope_workspace(self) -> Path:
+        self.create()
+        return ensure_caliscope_workspace(self.project_dir)
+
+    def trial_video_count(self) -> int:
+        folder = self.project_dir / "videos"
+        if not folder.exists():
+            return 0
+        return len([path for path in folder.iterdir() if path.is_file() and path.suffix.lower() == ".mp4"])
+
+    def import_caliscope_calibration(self, settings: PipelineSettings) -> CaliscopeImportResult:
+        self.create()
+        workspace_dir = self.caliscope_workspace()
+        source_path = find_caliscope_export(workspace_dir)
+        validation = validate_caliscope_export(source_path, expected_camera_count=self.trial_video_count() or None)
+        target_path, archived_path = copy_caliscope_export_to_pose2sim(source_path, self.project_dir)
+        converted_settings = replace(
+            settings,
+            calibration_mode="convert",
+            external_calibration_format="caliscope",
+        )
+        config_result = self.apply_settings_to_config(converted_settings)
+        return CaliscopeImportResult(
+            source_path=source_path,
+            target_path=target_path,
+            camera_count=validation.camera_count,
+            config_path=config_result.path,
+            config_changed=config_result.changed,
+            archived_calibration_path=archived_path,
+            config_backup_path=config_result.backup_path,
+        )
+
+    def analysis_inputs_newer_than_outputs(self) -> bool:
+        status = self.status()
+        if not status.mot_files:
+            return False
+        newest_result_time = max(path.stat().st_mtime for path in status.mot_files if path.exists())
+        input_paths = [self.project_dir / "Config.toml"]
+        calibration_dir = self.project_dir / "calibration"
+        if calibration_dir.exists():
+            input_paths.extend(path for path in calibration_dir.glob("*.toml") if path.is_file())
+        return any(path.exists() and path.stat().st_mtime > newest_result_time for path in input_paths)
 
     def clear_analysis_results(self) -> list[Path]:
         removed: list[Path] = []

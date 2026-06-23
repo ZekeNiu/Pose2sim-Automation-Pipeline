@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .caliscope_bridge import install_caliscope_gui
 from .models import EnvironmentStatus
 from .paths import SPORTS3D_PYTHON
 
@@ -37,6 +38,9 @@ data = {
     "pandas": version("pandas"),
     "pillow": version("pillow"),
     "toml": version("toml"),
+    "caliscope": version("caliscope"),
+    "pyside6": version("PySide6") or version("PySide6-Essentials") or version("pyside6-essentials"),
+    "caliscope_gui_available": False,
     "gpu_hint": "CPU",
 }
 try:
@@ -44,6 +48,12 @@ try:
     data["opensim"] = getattr(opensim, "__version__", "imported")
 except Exception as exc:
     data["opensim_error"] = repr(exc)
+try:
+    import caliscope
+    import PySide6
+    data["caliscope_gui_available"] = True
+except Exception as exc:
+    data["caliscope_gui_error"] = repr(exc)
 try:
     import onnxruntime as ort
     providers = ort.get_available_providers()
@@ -143,6 +153,9 @@ def check_environment(python_path: Path = SPORTS3D_PYTHON) -> EnvironmentStatus:
             errors=errors,
             ffprobe_path=shutil.which("ffprobe"),
             warnings=warnings,
+            caliscope_version=None,
+            pyside6_version=None,
+            caliscope_gui_available=False,
         )
 
     try:
@@ -172,6 +185,9 @@ def check_environment(python_path: Path = SPORTS3D_PYTHON) -> EnvironmentStatus:
     for key, label in required.items():
         if not data.get(key):
             errors.append(f"缺少 {label}。")
+
+    if not data.get("caliscope_gui_available"):
+        warnings.append("Caliscope 图形界面未检测到；若要使用 Caliscope 校准，请点击“修复 Caliscope GUI”。")
 
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
@@ -211,6 +227,9 @@ def check_environment(python_path: Path = SPORTS3D_PYTHON) -> EnvironmentStatus:
         warnings=warnings,
         python_version=data.get("python_version"),
         python_version_info=python_version_info,
+        caliscope_version=data.get("caliscope"),
+        pyside6_version=data.get("pyside6"),
+        caliscope_gui_available=bool(data.get("caliscope_gui_available")),
     )
 
 
@@ -242,3 +261,7 @@ def update_pose2sim(python_path: Path = SPORTS3D_PYTHON) -> subprocess.Popen:
         encoding="utf-8",
         errors="replace",
     )
+
+
+def repair_caliscope_gui(python_path: Path = SPORTS3D_PYTHON) -> subprocess.Popen:
+    return install_caliscope_gui(python_path)

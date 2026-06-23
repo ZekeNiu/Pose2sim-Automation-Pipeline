@@ -31,7 +31,7 @@ EXTERNAL_CALIBRATION_FORMAT_OPTIONS = {
     "EasyMocap（.yml / .yaml）": "easymocap",
     "BioCV（.calib）": "biocv",
     "OptiTrack（高级，需符合 Pose2Sim 官方要求）": "optitrack",
-    "Caliscope（高级，通常无需转换）": "caliscope",
+    "Caliscope（推荐外部校准，可自动接回 Pose2Sim）": "caliscope",
     "Anipose（高级，通常无需转换）": "anipose",
     "FreeMoCap（高级，通常无需转换）": "freemocap",
 }
@@ -53,7 +53,7 @@ EXTERNAL_CALIBRATION_DESCRIPTIONS = {
     "easymocap": "导入 EasyMocap 的 intri/extri .yml 或 .yaml 文件。",
     "biocv": "导入 BioCV 的 .calib 文件。",
     "optitrack": "高级格式。GUI 只复制文件并写入 Config，请确认文件结构符合 Pose2Sim 官方说明。",
-    "caliscope": "高级格式。Pose2Sim 通常可直接使用，GUI 只复制文件并写入 Config。",
+    "caliscope": "推荐用于多相机外部校准。GUI 会打开 Caliscope，完成后自动导入校准结果并写入 Config。",
     "anipose": "高级格式。Pose2Sim 通常可直接使用，GUI 只复制文件并写入 Config。",
     "freemocap": "高级格式。Pose2Sim 通常可直接使用，GUI 只复制文件并写入 Config。",
 }

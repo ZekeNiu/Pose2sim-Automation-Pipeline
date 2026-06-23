@@ -79,6 +79,9 @@ class EnvironmentStatus:
     warnings: list[str] = field(default_factory=list)
     python_version: str | None = None
     python_version_info: tuple[int, int, int] | None = None
+    caliscope_version: str | None = None
+    pyside6_version: str | None = None
+    caliscope_gui_available: bool = False
 
     @property
     def ok(self) -> bool:
@@ -98,6 +101,9 @@ class EnvironmentStatus:
             f"pandas: {self.pandas_version or '未检测到'}",
             f"Pillow: {self.pillow_version or '未检测到'}",
             f"toml: {self.toml_version or '未检测到'}",
+            f"Caliscope: {self.caliscope_version or '未检测到'}",
+            f"PySide6: {self.pyside6_version or '未检测到'}",
+            f"Caliscope GUI: {'可用' if self.caliscope_gui_available else '未检测到'}",
             f"ffmpeg: {self.ffmpeg_path or '未检测到'}",
             f"ffprobe: {self.ffprobe_path or '未检测到'}",
             f"加速提示: {self.gpu_hint}",

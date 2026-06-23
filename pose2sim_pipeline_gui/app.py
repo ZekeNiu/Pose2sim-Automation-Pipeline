@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from .caliscope_bridge import ensure_caliscope_workspace, launch_caliscope_for_project
 from .checkerboard import generate_checkerboard
 from .config_adapter import load_config, settings_from_config
 from .config_builder import (
@@ -19,7 +20,13 @@ from .config_builder import (
     EXTERNAL_CALIBRATION_FORMAT_LABELS,
     EXTERNAL_CALIBRATION_FORMAT_OPTIONS,
 )
-from .environment import check_environment, pose2sim_supports_lower_body, summarize_pose2sim_update, update_pose2sim
+from .environment import (
+    check_environment,
+    pose2sim_supports_lower_body,
+    repair_caliscope_gui as repair_caliscope_gui_process,
+    summarize_pose2sim_update,
+    update_pose2sim,
+)
 from .models import PipelineSettings
 from .paths import OUTPUTS_DIR, SPORTS3D_PYTHON, ensure_workspace
 from .project_state import ProjectStatus
@@ -98,6 +105,7 @@ class Pose2SimChineseApp(ctk.CTk):
         self.project_status_info: ProjectStatus | None = None
         self.runner = PipelineRunner(SPORTS3D_PYTHON)
         self.update_button: ctk.CTkButton | None = None
+        self.caliscope_repair_button: ctk.CTkButton | None = None
         self._build_ui()
         self.after(150, self._drain_log_queue)
 
@@ -227,7 +235,14 @@ class Pose2SimChineseApp(ctk.CTk):
         buttons.grid(row=2, column=0, sticky="ew", padx=18, pady=8)
         ctk.CTkButton(buttons, text="检查环境", command=self.check_environment).pack(side="left", padx=(0, 8))
         self.update_button = ctk.CTkButton(buttons, text="一键更新 Pose2Sim", command=self.update_pose2sim)
-        self.update_button.pack(side="left")
+        self.update_button.pack(side="left", padx=(0, 8))
+        self.caliscope_repair_button = ctk.CTkButton(
+            buttons,
+            text="修复 Caliscope GUI",
+            fg_color="#0f766e",
+            command=self.repair_caliscope_gui,
+        )
+        self.caliscope_repair_button.pack(side="left")
         self.environment_text = ctk.CTkTextbox(tab, height=480)
         self.environment_text.grid(row=3, column=0, sticky="nsew", padx=18, pady=12)
         self._step_nav(tab, "环境", 4)
@@ -329,11 +344,32 @@ class Pose2SimChineseApp(ctk.CTk):
             wraplength=680,
         )
         self.external_calibration_description.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=(0, 8))
-        ctk.CTkButton(
+        self.external_calibration_import_button = ctk.CTkButton(
             self.external_calibration_frame,
             text="导入外部校准文件",
             command=self.import_external_calibration,
-        ).grid(row=1, column=2, sticky="e", pady=(0, 8))
+        )
+        self.external_calibration_import_button.grid(row=1, column=2, sticky="e", pady=(0, 8))
+
+        self.caliscope_actions_frame = ctk.CTkFrame(self.external_calibration_frame, fg_color="transparent")
+        self.caliscope_actions_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        ctk.CTkButton(
+            self.caliscope_actions_frame,
+            text="打开 Caliscope 校准",
+            command=self.open_caliscope_calibration,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            self.caliscope_actions_frame,
+            text="我已完成，导入校准结果",
+            command=self.import_caliscope_calibration,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            self.caliscope_actions_frame,
+            text="打开 Caliscope 工作区",
+            fg_color="#64748b",
+            command=self.open_caliscope_workspace,
+        ).pack(side="left")
+        self.caliscope_actions_frame.grid_remove()
 
         board_grid = ctk.CTkFrame(content, fg_color="transparent")
         board_grid.grid(row=4, column=0, sticky="ew", padx=18, pady=8)
@@ -878,6 +914,12 @@ class Pose2SimChineseApp(ctk.CTk):
             self.external_calibration_format_box.get(),
         )
 
+    def _set_caliscope_calibration_mode(self) -> None:
+        self._set_combo_by_value(self.calibration_mode, CALIBRATION_MODE_OPTIONS, "convert")
+        self._set_combo_by_value(self.external_calibration_format_box, EXTERNAL_CALIBRATION_FORMAT_OPTIONS, "caliscope")
+        self._on_calibration_mode_change()
+        self._on_external_calibration_format_change()
+
     def _target_selection_value(self) -> str:
         return TARGET_SELECTION_OPTIONS.get(self.target_mode_box.get(), self.target_mode_box.get())
 
@@ -1292,11 +1334,22 @@ class Pose2SimChineseApp(ctk.CTk):
             return
         fmt = self._external_calibration_format_value()
         text = EXTERNAL_CALIBRATION_DESCRIPTIONS.get(fmt, "高级格式。请确认文件符合 Pose2Sim 官方说明。")
-        expected = EXTERNAL_CALIBRATION_EXTENSIONS.get(fmt)
-        if expected:
-            text += " 预期文件类型：" + "、".join(expected)
+        if fmt == "caliscope":
+            text += " 请先打开 Caliscope 完成校准并保存，再回到本 GUI 导入校准结果。"
+            if hasattr(self, "external_calibration_import_button"):
+                self.external_calibration_import_button.grid_remove()
+            if hasattr(self, "caliscope_actions_frame"):
+                self.caliscope_actions_frame.grid()
         else:
-            text += " GUI 不限制扩展名。"
+            expected = EXTERNAL_CALIBRATION_EXTENSIONS.get(fmt)
+            if expected:
+                text += " 预期文件类型：" + "、".join(expected)
+            else:
+                text += " GUI 不限制扩展名。"
+            if hasattr(self, "external_calibration_import_button"):
+                self.external_calibration_import_button.grid()
+            if hasattr(self, "caliscope_actions_frame"):
+                self.caliscope_actions_frame.grid_remove()
         self.external_calibration_description.configure(text=text)
 
     def _toggle_advanced_parameters(self) -> None:
@@ -1364,6 +1417,50 @@ class Pose2SimChineseApp(ctk.CTk):
             except Exception as exc:
                 message = str(exc)
                 self._queue_log("environment", f"更新失败: {message}")
+                self.after(0, lambda: finish(message, True))
+
+        thread = threading.Thread(target=task, daemon=True)
+        thread.start()
+
+    def repair_caliscope_gui(self) -> None:
+        proceed = messagebox.askyesno(
+            "确认修复 Caliscope GUI",
+            "将使用当前 sports3d 环境安装或修复 Caliscope 图形界面组件。\n\n"
+            "命令会运行 pip install --upgrade --upgrade-strategy only-if-needed caliscope[gui]。是否继续？",
+        )
+        if not proceed:
+            self._append(self.environment_text, "已取消 Caliscope GUI 修复。")
+            return
+        if self.caliscope_repair_button is not None:
+            self.caliscope_repair_button.configure(state="disabled", text="正在修复...")
+        self._append(self.environment_text, "正在安装/修复 Caliscope GUI，请稍候...")
+
+        def finish(message: str, is_error: bool = False) -> None:
+            if self.caliscope_repair_button is not None:
+                self.caliscope_repair_button.configure(state="normal", text="修复 Caliscope GUI")
+            if is_error:
+                messagebox.showerror("Caliscope GUI 修复失败", message)
+            else:
+                messagebox.showinfo("Caliscope GUI 可用", message)
+
+        def task() -> None:
+            try:
+                process = repair_caliscope_gui_process()
+                assert process.stdout is not None
+                for line in process.stdout:
+                    self._queue_log("environment", line.rstrip())
+                code = process.wait()
+                self._queue_log("environment", f"Caliscope GUI 修复命令结束，退出码 {code}。")
+                status = check_environment()
+                for line in status.to_chinese_lines():
+                    self._queue_log("environment", line)
+                if code == 0 and status.caliscope_gui_available:
+                    self.after(0, lambda: finish("Caliscope GUI 已可用。"))
+                else:
+                    self.after(0, lambda: finish("Caliscope GUI 仍不可用，请查看环境页日志。", True))
+            except Exception as exc:
+                message = str(exc)
+                self._queue_log("environment", f"Caliscope GUI 修复失败: {message}")
                 self.after(0, lambda: finish(message, True))
 
         thread = threading.Thread(target=task, daemon=True)
@@ -1567,6 +1664,52 @@ class Pose2SimChineseApp(ctk.CTk):
 
         self._thread(task, "开始导入外部校准文件...", "calibration")
 
+    def open_caliscope_workspace(self) -> None:
+        try:
+            workspace = self._current_workspace()
+            caliscope_dir = ensure_caliscope_workspace(workspace.project_dir)
+            os.startfile(caliscope_dir)
+            self._queue_log("calibration", "已打开 Caliscope 专用工作区。")
+        except Exception as exc:
+            messagebox.showerror("Caliscope 工作区错误", str(exc))
+
+    def open_caliscope_calibration(self) -> None:
+        try:
+            self._set_caliscope_calibration_mode()
+            workspace = self._current_workspace()
+            ensure_caliscope_workspace(workspace.project_dir)
+            launch_caliscope_for_project(workspace.project_dir)
+            self._queue_log("calibration", "已打开 Caliscope。请在 Caliscope 中完成校准并保存，然后回到本 GUI 点击“我已完成，导入校准结果”。")
+            messagebox.showinfo(
+                "Caliscope 已打开",
+                "请在 Caliscope 中完成校准并保存。\n\n完成后回到本 GUI，点击“我已完成，导入校准结果”。",
+            )
+        except Exception as exc:
+            messagebox.showerror("Caliscope 启动失败", str(exc))
+
+    def import_caliscope_calibration(self) -> None:
+        try:
+            self._set_caliscope_calibration_mode()
+            workspace = self._current_workspace()
+            settings = self._settings()
+            result = workspace.import_caliscope_calibration(settings)
+            self._refresh_project_status()
+            self._queue_log(
+                "calibration",
+                f"Caliscope 校准结果已导入，共 {result.camera_count} 个机位。Config 已更新为使用 Caliscope 校准。",
+            )
+            if result.config_backup_path:
+                self._queue_log("calibration", "已自动备份旧 Config。")
+            if workspace.analysis_inputs_newer_than_outputs():
+                self._queue_log("calibration", "检测到新校准结果；下次运行会重新分析，不会只生成报告。")
+            messagebox.showinfo(
+                "Caliscope 校准结果已导入",
+                f"已导入 {result.camera_count} 个机位的校准结果，并把当前项目设置为使用 Caliscope 校准。\n\n"
+                "现在可以到“运行”页继续分析。",
+            )
+        except Exception as exc:
+            messagebox.showerror("Caliscope 校准导入失败", str(exc))
+
     def _make_checkerboard(self, *, square_entry: ctk.CTkEntry, page_size: str, purpose: str) -> None:
         try:
             square = self._optional_float(square_entry.get()) or (35.0 if page_size == "A4" else 45.0)
@@ -1626,7 +1769,8 @@ class Pose2SimChineseApp(ctk.CTk):
             settings = self._settings()
             status_before = workspace.status()
             config_preview = workspace.preview_settings_to_config(settings)
-            report_only = status_before.has_kinematics and not config_preview.changed
+            inputs_are_newer = workspace.analysis_inputs_newer_than_outputs()
+            report_only = status_before.has_kinematics and not config_preview.changed and not inputs_are_newer
             if report_only:
                 config_result = None
             else:
