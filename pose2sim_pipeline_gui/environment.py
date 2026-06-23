@@ -187,7 +187,7 @@ def check_environment(python_path: Path = SPORTS3D_PYTHON) -> EnvironmentStatus:
             errors.append(f"缺少 {label}。")
 
     if not data.get("caliscope_gui_available"):
-        warnings.append("Caliscope 图形界面未检测到；若要使用 Caliscope 校准，请点击“修复 Caliscope GUI”。")
+        warnings.append("Caliscope 图形界面未检测到；若要使用 Caliscope 校准，请点击“安装/修复 Caliscope GUI”。")
 
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:

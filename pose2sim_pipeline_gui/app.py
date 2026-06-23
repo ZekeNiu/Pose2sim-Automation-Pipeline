@@ -83,6 +83,29 @@ TRACKED_KEYPOINT_OPTIONS = {
 }
 TRACKED_KEYPOINT_LABELS = {value: label for label, value in TRACKED_KEYPOINT_OPTIONS.items()}
 
+CALISCOPE_USAGE_HELP_TITLE = "Caliscope 使用说明"
+CALISCOPE_USAGE_HELP_TEXT = (
+    "什么时候用 Caliscope：\n"
+    "适合多相机外部校准，尤其是你不想在 Pose2Sim 里手动点击场景点，或希望用独立校准软件完成内参和外参时。\n\n"
+    "在中文 GUI 里的步骤：\n"
+    "1. 先创建/打开项目，并按机位顺序导入测试视频。\n"
+    "2. 在校准页选择“使用已有/外部校准”，外部校准来源选择 Caliscope。\n"
+    "3. 点击“打开 Caliscope 校准”。\n"
+    "4. 在 Caliscope 中完成校准并保存。\n"
+    "5. 回到本 GUI，点击“我已完成，导入校准结果”。GUI 会自动检查并接回 Pose2Sim。\n\n"
+    "在 Caliscope 里的高层步骤：\n"
+    "1. 使用当前项目工作区。\n"
+    "2. 设置校准板。\n"
+    "3. 完成每台相机的内参校准。\n"
+    "4. 完成多相机外参校准。\n"
+    "5. 保存校准结果。\n\n"
+    "注意事项：\n"
+    "- 校准后相机不能移动；相机一旦移动，需要重新做外参。\n"
+    "- Caliscope 中的相机数量必须和本项目测试视频数量一致。\n"
+    "- 机位顺序要和本 GUI 导入测试视频的顺序一致，例如 cam01、cam02 对应同一组相机。\n"
+    "- 如果导入失败，先回到 Caliscope 确认已完成外参校准并保存，再回本 GUI 重新导入。"
+)
+
 
 def parse_float_list(value: str) -> list[float]:
     normalized = value.replace("，", ",").replace("；", ",").replace(";", ",")
@@ -238,7 +261,7 @@ class Pose2SimChineseApp(ctk.CTk):
         self.update_button.pack(side="left", padx=(0, 8))
         self.caliscope_repair_button = ctk.CTkButton(
             buttons,
-            text="修复 Caliscope GUI",
+            text="安装/修复 Caliscope GUI",
             fg_color="#0f766e",
             command=self.repair_caliscope_gui,
         )
@@ -368,6 +391,11 @@ class Pose2SimChineseApp(ctk.CTk):
             text="打开 Caliscope 工作区",
             fg_color="#64748b",
             command=self.open_caliscope_workspace,
+        ).pack(side="left", padx=(0, 8))
+        self._info_button(
+            self.caliscope_actions_frame,
+            CALISCOPE_USAGE_HELP_TITLE,
+            CALISCOPE_USAGE_HELP_TEXT,
         ).pack(side="left")
         self.caliscope_actions_frame.grid_remove()
 
@@ -1424,22 +1452,22 @@ class Pose2SimChineseApp(ctk.CTk):
 
     def repair_caliscope_gui(self) -> None:
         proceed = messagebox.askyesno(
-            "确认修复 Caliscope GUI",
+            "确认安装/修复 Caliscope GUI",
             "将使用当前 sports3d 环境安装或修复 Caliscope 图形界面组件。\n\n"
             "命令会运行 pip install --upgrade --upgrade-strategy only-if-needed caliscope[gui]。是否继续？",
         )
         if not proceed:
-            self._append(self.environment_text, "已取消 Caliscope GUI 修复。")
+            self._append(self.environment_text, "已取消 Caliscope GUI 安装/修复。")
             return
         if self.caliscope_repair_button is not None:
-            self.caliscope_repair_button.configure(state="disabled", text="正在修复...")
+            self.caliscope_repair_button.configure(state="disabled", text="正在安装/修复...")
         self._append(self.environment_text, "正在安装/修复 Caliscope GUI，请稍候...")
 
         def finish(message: str, is_error: bool = False) -> None:
             if self.caliscope_repair_button is not None:
-                self.caliscope_repair_button.configure(state="normal", text="修复 Caliscope GUI")
+                self.caliscope_repair_button.configure(state="normal", text="安装/修复 Caliscope GUI")
             if is_error:
-                messagebox.showerror("Caliscope GUI 修复失败", message)
+                messagebox.showerror("Caliscope GUI 安装/修复失败", message)
             else:
                 messagebox.showinfo("Caliscope GUI 可用", message)
 
@@ -1450,7 +1478,7 @@ class Pose2SimChineseApp(ctk.CTk):
                 for line in process.stdout:
                     self._queue_log("environment", line.rstrip())
                 code = process.wait()
-                self._queue_log("environment", f"Caliscope GUI 修复命令结束，退出码 {code}。")
+                self._queue_log("environment", f"Caliscope GUI 安装/修复命令结束，退出码 {code}。")
                 status = check_environment()
                 for line in status.to_chinese_lines():
                     self._queue_log("environment", line)
@@ -1460,7 +1488,7 @@ class Pose2SimChineseApp(ctk.CTk):
                     self.after(0, lambda: finish("Caliscope GUI 仍不可用，请查看环境页日志。", True))
             except Exception as exc:
                 message = str(exc)
-                self._queue_log("environment", f"Caliscope GUI 修复失败: {message}")
+                self._queue_log("environment", f"Caliscope GUI 安装/修复失败: {message}")
                 self.after(0, lambda: finish(message, True))
 
         thread = threading.Thread(target=task, daemon=True)
