@@ -11,6 +11,7 @@ from pose2sim_pipeline_gui.caliscope_bridge import (
     CALISCOPE_EXPORT_NAME,
     find_caliscope_export,
     launch_caliscope_for_project,
+    prepare_caliscope_workspace,
     validate_caliscope_export,
 )
 from pose2sim_pipeline_gui.models import PipelineSettings
@@ -36,6 +37,32 @@ def _valid_caliscope_data(camera_count: int = 2) -> dict:
 def _write_caliscope_export(path: Path, camera_count: int = 2) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(toml.dumps(_valid_caliscope_data(camera_count)), encoding="utf-8")
+
+
+def _write_trial_video(project_dir: Path, camera_label: str) -> Path:
+    path = project_dir / "videos" / f"{camera_label}.mp4"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(f"trial {camera_label}".encode("utf-8"))
+    return path
+
+
+def _write_intrinsic_video(project_dir: Path, camera_label: str) -> Path:
+    path = project_dir / "calibration" / "intrinsics" / camera_label / f"{camera_label}_intrinsics.mp4"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(f"intrinsic {camera_label}".encode("utf-8"))
+    return path
+
+
+def _write_extrinsic_file(project_dir: Path, camera_label: str, suffix: str = ".mp4") -> Path:
+    path = project_dir / "calibration" / "extrinsics" / f"{camera_label}{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(f"extrinsic {camera_label}".encode("utf-8"))
+    return path
+
+
+def _clean_workspace(workspace: ProjectWorkspace) -> None:
+    shutil.rmtree(workspace.project_dir, ignore_errors=True)
+    shutil.rmtree(workspace.output_dir, ignore_errors=True)
 
 
 def test_find_caliscope_export_uses_newest_result(tmp_path: Path) -> None:
@@ -68,6 +95,132 @@ def test_validate_caliscope_export_checks_camera_count(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="相机数量是 2，当前项目视频数量是 3"):
         validate_caliscope_export(source, expected_camera_count=3)
+
+
+def test_prepare_caliscope_workspace_maps_project_videos() -> None:
+    workspace = ProjectWorkspace("_test_workspace_prepare_caliscope")
+    _clean_workspace(workspace)
+    try:
+        workspace.create()
+        _write_trial_video(workspace.project_dir, "cam01")
+        _write_trial_video(workspace.project_dir, "cam02")
+        _write_intrinsic_video(workspace.project_dir, "cam01")
+        _write_intrinsic_video(workspace.project_dir, "cam02")
+        _write_extrinsic_file(workspace.project_dir, "cam01")
+        _write_extrinsic_file(workspace.project_dir, "cam02")
+        stale_video = workspace.caliscope_workspace() / "calibration" / "extrinsic" / "cam_9.mp4"
+        stale_video.parent.mkdir(parents=True, exist_ok=True)
+        stale_video.write_bytes(b"stale")
+
+        result = prepare_caliscope_workspace(workspace.project_dir)
+
+        assert result.camera_count == 2
+        assert [camera.camera_label for camera in result.cameras] == ["cam01", "cam02"]
+        assert (workspace.caliscope_workspace() / "calibration" / "intrinsic" / "cam_0.mp4").read_bytes() == b"intrinsic cam01"
+        assert (workspace.caliscope_workspace() / "calibration" / "extrinsic" / "cam_0.mp4").read_bytes() == b"extrinsic cam01"
+        assert (workspace.caliscope_workspace() / "calibration" / "intrinsic" / "cam_1.mp4").read_bytes() == b"intrinsic cam02"
+        assert (workspace.caliscope_workspace() / "calibration" / "extrinsic" / "cam_1.mp4").read_bytes() == b"extrinsic cam02"
+        assert not stale_video.exists()
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_prepare_caliscope_workspace_reports_missing_intrinsics() -> None:
+    workspace = ProjectWorkspace("_test_workspace_prepare_missing_intrinsics")
+    _clean_workspace(workspace)
+    try:
+        workspace.create()
+        _write_trial_video(workspace.project_dir, "cam01")
+        _write_trial_video(workspace.project_dir, "cam02")
+        _write_intrinsic_video(workspace.project_dir, "cam01")
+        _write_extrinsic_file(workspace.project_dir, "cam01")
+        _write_extrinsic_file(workspace.project_dir, "cam02")
+        existing_video = workspace.caliscope_workspace() / "calibration" / "intrinsic" / "cam_0.mp4"
+        existing_video.parent.mkdir(parents=True, exist_ok=True)
+        existing_video.write_bytes(b"existing")
+
+        with pytest.raises(ValueError, match="缺少内参视频"):
+            prepare_caliscope_workspace(workspace.project_dir)
+        assert existing_video.read_bytes() == b"existing"
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_prepare_caliscope_workspace_reports_missing_extrinsics() -> None:
+    workspace = ProjectWorkspace("_test_workspace_prepare_missing_extrinsics")
+    _clean_workspace(workspace)
+    try:
+        workspace.create()
+        _write_trial_video(workspace.project_dir, "cam01")
+        _write_trial_video(workspace.project_dir, "cam02")
+        _write_intrinsic_video(workspace.project_dir, "cam01")
+        _write_intrinsic_video(workspace.project_dir, "cam02")
+        _write_extrinsic_file(workspace.project_dir, "cam01")
+
+        with pytest.raises(ValueError, match="缺少外参视频"):
+            prepare_caliscope_workspace(workspace.project_dir)
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_prepare_caliscope_workspace_rejects_image_only_extrinsics() -> None:
+    workspace = ProjectWorkspace("_test_workspace_prepare_image_extrinsics")
+    _clean_workspace(workspace)
+    try:
+        workspace.create()
+        _write_trial_video(workspace.project_dir, "cam01")
+        _write_trial_video(workspace.project_dir, "cam02")
+        _write_intrinsic_video(workspace.project_dir, "cam01")
+        _write_intrinsic_video(workspace.project_dir, "cam02")
+        _write_extrinsic_file(workspace.project_dir, "cam01", ".png")
+        _write_extrinsic_file(workspace.project_dir, "cam02", ".jpg")
+
+        with pytest.raises(ValueError, match="Caliscope 需要重新导入外参视频"):
+            prepare_caliscope_workspace(workspace.project_dir)
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_prepare_caliscope_workspace_keeps_saved_caliscope_results() -> None:
+    workspace = ProjectWorkspace("_test_workspace_prepare_preserves_results")
+    _clean_workspace(workspace)
+    try:
+        workspace.create()
+        _write_trial_video(workspace.project_dir, "cam01")
+        _write_trial_video(workspace.project_dir, "cam02")
+        _write_intrinsic_video(workspace.project_dir, "cam01")
+        _write_intrinsic_video(workspace.project_dir, "cam02")
+        _write_extrinsic_file(workspace.project_dir, "cam01")
+        _write_extrinsic_file(workspace.project_dir, "cam02")
+        export = workspace.caliscope_workspace() / CALISCOPE_EXPORT_NAME
+        _write_caliscope_export(export)
+
+        prepare_caliscope_workspace(workspace.project_dir)
+        prepare_caliscope_workspace(workspace.project_dir)
+
+        assert export.exists()
+        assert toml.load(export)["cam_0"]["name"] == "cam_0"
+    finally:
+        _clean_workspace(workspace)
+
+
+def test_prepare_caliscope_workspace_checks_trial_video_count() -> None:
+    workspace = ProjectWorkspace("_test_workspace_prepare_trial_count")
+    _clean_workspace(workspace)
+    try:
+        workspace.create()
+        _write_trial_video(workspace.project_dir, "cam01")
+        _write_trial_video(workspace.project_dir, "cam02")
+        _write_trial_video(workspace.project_dir, "cam03")
+        _write_intrinsic_video(workspace.project_dir, "cam01")
+        _write_intrinsic_video(workspace.project_dir, "cam02")
+        _write_extrinsic_file(workspace.project_dir, "cam01")
+        _write_extrinsic_file(workspace.project_dir, "cam02")
+
+        with pytest.raises(ValueError, match="当前项目测试视频数量是 3"):
+            prepare_caliscope_workspace(workspace.project_dir)
+    finally:
+        _clean_workspace(workspace)
 
 
 def test_workspace_imports_caliscope_result_and_updates_config() -> None:

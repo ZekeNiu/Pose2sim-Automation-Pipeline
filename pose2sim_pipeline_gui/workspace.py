@@ -7,9 +7,11 @@ from pathlib import Path
 
 from .caliscope_bridge import (
     CaliscopeImportResult,
+    CaliscopeWorkspacePrepResult,
     copy_caliscope_export_to_pose2sim,
     ensure_caliscope_workspace,
     find_caliscope_export,
+    prepare_caliscope_workspace,
     validate_caliscope_export,
 )
 from .config_adapter import ConfigApplyResult, config_text, load_config, merged_config
@@ -225,6 +227,10 @@ class ProjectWorkspace:
     def caliscope_workspace(self) -> Path:
         self.create()
         return ensure_caliscope_workspace(self.project_dir)
+
+    def prepare_caliscope_workspace(self) -> CaliscopeWorkspacePrepResult:
+        self.create()
+        return prepare_caliscope_workspace(self.project_dir)
 
     def trial_video_count(self) -> int:
         folder = self.project_dir / "videos"

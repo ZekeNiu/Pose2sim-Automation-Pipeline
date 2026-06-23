@@ -85,25 +85,27 @@ TRACKED_KEYPOINT_LABELS = {value: label for label, value in TRACKED_KEYPOINT_OPT
 
 CALISCOPE_USAGE_HELP_TITLE = "Caliscope 使用说明"
 CALISCOPE_USAGE_HELP_TEXT = (
-    "什么时候用 Caliscope：\n"
-    "适合多相机外部校准，尤其是你不想在 Pose2Sim 里手动点击场景点，或希望用独立校准软件完成内参和外参时。\n\n"
-    "在中文 GUI 里的步骤：\n"
-    "1. 先创建/打开项目，并按机位顺序导入测试视频。\n"
-    "2. 在校准页选择“使用已有/外部校准”，外部校准来源选择 Caliscope。\n"
-    "3. 点击“打开 Caliscope 校准”。\n"
-    "4. 在 Caliscope 中完成校准并保存。\n"
-    "5. 回到本 GUI，点击“我已完成，导入校准结果”。GUI 会自动检查并接回 Pose2Sim。\n\n"
-    "在 Caliscope 里的高层步骤：\n"
-    "1. 使用当前项目工作区。\n"
-    "2. 设置校准板。\n"
-    "3. 完成每台相机的内参校准。\n"
-    "4. 完成多相机外参校准。\n"
-    "5. 保存校准结果。\n\n"
-    "注意事项：\n"
+    "先在中文 GUI 做完这些准备：\n"
+    "0. 在“校准”页按同一机位顺序导入内参视频和外参视频。Caliscope 外参需要视频，不能只用图片或场景点。\n"
+    "1. 外参方法选择“使用已有/外部校准”，外部校准来源选择 Caliscope。\n"
+    "2. 点击“准备并打开 Caliscope 校准”。中文 GUI 会自动把校准视频整理成 Caliscope 需要的项目结构。\n\n"
+    "打开 Caliscope 后按这个顺序做：\n"
+    "1. 在 Project 页确认能看到已检测到相机数量。如果仍显示没有相机，先回中文 GUI 检查内参/外参视频是否都导入。\n"
+    "2. 如果需要，先在 Project 页设置校准板，并保存/打印对应的标定板图片。\n"
+    "3. 点击顶部 Cameras 标签；逐个选择相机，点击 Calibrate，完成每台相机的内参校准。\n"
+    "4. 所有相机内参都完成后，点击顶部 Multi-Camera 标签，点击 Start Processing，处理外参视频中的标定板点。\n"
+    "5. Multi-Camera 处理完成后，点击顶部 Capture Volume 标签，点击 Calibrate，完成多相机外参校准。\n"
+    "6. Caliscope 保存完成后，回到中文 GUI，点击“我已完成，导入校准结果”。中文 GUI 会自动检查并接回 Pose2Sim。\n\n"
+    "如果某个 Caliscope 标签页灰掉，或 Go to Tab 点不动：\n"
+    "- 通常不是软件坏了，而是前一步还没完成。\n"
+    "- Cameras 灰掉：中文 GUI 还没有为 Caliscope 准备好每个机位的内参和外参视频。\n"
+    "- Multi-Camera 灰掉：每台相机的内参还没全部完成。\n"
+    "- Capture Volume 灰掉：Multi-Camera 的 Start Processing 还没完成。\n\n"
+    "重要注意事项：\n"
     "- 校准后相机不能移动；相机一旦移动，需要重新做外参。\n"
     "- Caliscope 中的相机数量必须和本项目测试视频数量一致。\n"
-    "- 机位顺序要和本 GUI 导入测试视频的顺序一致，例如 cam01、cam02 对应同一组相机。\n"
-    "- 如果导入失败，先回到 Caliscope 确认已完成外参校准并保存，再回本 GUI 重新导入。"
+    "- 机位顺序要和中文 GUI 导入测试视频的顺序一致。\n"
+    "- 如果导入失败，先回到 Caliscope 确认已完成外参校准并保存，再回中文 GUI 重新导入。"
 )
 
 
@@ -164,6 +166,26 @@ class Pose2SimChineseApp(ctk.CTk):
             corner_radius=13,
             command=lambda: messagebox.showinfo(title, body),
         )
+
+    def _show_scrollable_info(self, title: str, body: str) -> None:
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(title)
+        dialog.geometry("820x620")
+        dialog.minsize(680, 480)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.grid_columnconfigure(0, weight=1)
+        dialog.grid_rowconfigure(0, weight=1)
+
+        text = ctk.CTkTextbox(dialog, wrap="word", font=ctk.CTkFont(size=14))
+        text.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 10))
+        text.insert("1.0", body)
+        text.configure(state="disabled")
+
+        ctk.CTkButton(dialog, text="知道了", width=120, command=dialog.destroy).grid(
+            row=1, column=0, sticky="e", padx=16, pady=(0, 16)
+        )
+        dialog.focus()
 
     def _label_with_info(
         self,
@@ -378,7 +400,7 @@ class Pose2SimChineseApp(ctk.CTk):
         self.caliscope_actions_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         ctk.CTkButton(
             self.caliscope_actions_frame,
-            text="打开 Caliscope 校准",
+            text="准备并打开 Caliscope 校准",
             command=self.open_caliscope_calibration,
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
@@ -392,10 +414,13 @@ class Pose2SimChineseApp(ctk.CTk):
             fg_color="#64748b",
             command=self.open_caliscope_workspace,
         ).pack(side="left", padx=(0, 8))
-        self._info_button(
+        ctk.CTkButton(
             self.caliscope_actions_frame,
-            CALISCOPE_USAGE_HELP_TITLE,
-            CALISCOPE_USAGE_HELP_TEXT,
+            text="i",
+            width=26,
+            height=26,
+            corner_radius=13,
+            command=lambda: self._show_scrollable_info(CALISCOPE_USAGE_HELP_TITLE, CALISCOPE_USAGE_HELP_TEXT),
         ).pack(side="left")
         self.caliscope_actions_frame.grid_remove()
 
@@ -1705,12 +1730,18 @@ class Pose2SimChineseApp(ctk.CTk):
         try:
             self._set_caliscope_calibration_mode()
             workspace = self._current_workspace()
-            ensure_caliscope_workspace(workspace.project_dir)
+            prep = workspace.prepare_caliscope_workspace()
             launch_caliscope_for_project(workspace.project_dir)
-            self._queue_log("calibration", "已打开 Caliscope。请在 Caliscope 中完成校准并保存，然后回到本 GUI 点击“我已完成，导入校准结果”。")
+            self._queue_log(
+                "calibration",
+                f"已为 Caliscope 准备 {prep.camera_count} 个机位，Cameras 标签应可点击。"
+                "如果仍不可点击，请查看 Caliscope Project 页的状态文字。",
+            )
             messagebox.showinfo(
                 "Caliscope 已打开",
-                "请在 Caliscope 中完成校准并保存。\n\n完成后回到本 GUI，点击“我已完成，导入校准结果”。",
+                f"已为 Caliscope 准备 {prep.camera_count} 个机位，Cameras 标签应可点击。\n\n"
+                "如果仍不可点击，请查看 Caliscope Project 页的状态文字。\n\n"
+                "完成校准并保存后，回到本 GUI 点击“我已完成，导入校准结果”。",
             )
         except Exception as exc:
             messagebox.showerror("Caliscope 启动失败", str(exc))
